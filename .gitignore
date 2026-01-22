@@ -208,4 +208,11 @@ __marimo__/
 
 # OS
 .DS_Store
+<<<<<<< HEAD
 Thumbs.db
+=======
+Thumbs.db
+
+# startup snapshot
+startup_snapshot.json
+>>>>>>> 08854021ea7ab081f3d1a53c26d9e7acb8ece9db
