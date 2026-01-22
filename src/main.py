@@ -1,6 +1,10 @@
 import customtkinter as ctk
 import os
+import threading
+import json
+from tkinter import messagebox
 from startup_checker import StartupMonitor
+from scanner import SensitiveDataScanner
 
 # --- 초기 설정 ---
 ctk.set_appearance_mode("Dark")
@@ -78,7 +82,9 @@ class App(ctk.CTk):
             frame.grid_forget()
         
         if name == "dashboard": self.dashboard_frame.grid(row=0, column=1, sticky="nsew")
-        elif name == "scan": self.scan_frame.grid(row=0, column=1, sticky="nsew")
+        elif name == "scan": 
+            self.scan_frame.grid(row=0, column=1, sticky="nsew")
+            self.scan_frame.reset_ui()
         elif name == "wipe": self.wipe_frame.grid(row=0, column=1, sticky="nsew")
         elif name == "clean": self.clean_frame.grid(row=0, column=1, sticky="nsew")
         elif name == "startup": self.startup_frame.grid(row=0, column=1, sticky="nsew")
@@ -108,7 +114,9 @@ class DashboardFrame(ctk.CTkFrame):
         self.grid_frame.grid_rowconfigure((0, 1), weight=1)
 
         # 카드 생성 (command에 이동할 함수를 연결)
-        self.create_clickable_card(0, 0, "⚠️ 개인정보 노출", "3건 발견됨\n(메모장 내 비밀번호)", "#C0392B", f_sub, f_body, command=self.app.show_scan)
+        self.card_scan, self.lbl_scan_title, self.lbl_scan_content = self.create_clickable_card(
+            0, 0, "❓ 개인정보 스캔", "스캔이 필요합니다.", "#E67E22", f_sub, f_body, command=self.app.show_scan
+        )
         self.create_clickable_card(0, 1, "🔒 보안 삭제 도구", "파일을 안전하게\n파쇄할 준비 완료", "#2980B9", f_sub, f_body, command=self.app.show_wipe)
         self.create_clickable_card(1, 0, "🧹 디지털 청소", "1.2GB 정리 가능\n(다운로드 폴더)", "#D35400", f_sub, f_body, command=self.app.show_clean)
         self.card_startup, self.lbl_startup_title, self.lbl_startup_content = self.create_clickable_card(
@@ -162,23 +170,260 @@ class DashboardFrame(ctk.CTkFrame):
             self.card_startup.configure(border_color="#2980B9") # 파랑
             self.lbl_startup_title.configure(text="ℹ️ 감시 시작", text_color="#2980B9")
             self.lbl_startup_content.configure(text="기준 스냅샷 생성 완료")
+    
+    # [수정 2] 스캔 결과에 따라 대시보드 카드를 바꾸는 함수 추가
+    def update_scan_ui(self, count):
+        if count > 0:
+            # 위험 요소 발견 시 (빨강)
+            self.card_scan.configure(border_color="#C0392B")
+            self.lbl_scan_title.configure(text=f"⚠️ 개인정보 노출", text_color="#C0392B")
+            self.lbl_scan_content.configure(text=f"{count}건의 위험 정보가\n발견되었습니다.")
+        else:
+            # 안전할 때 (초록)
+            self.card_scan.configure(border_color="#27AE60")
+            self.lbl_scan_title.configure(text="✅ 개인정보 안전", text_color="#27AE60")
+            self.lbl_scan_content.configure(text="발견된 개인정보가\n없습니다.")
 
 
 # --- 나머지 프레임들은 동일 ---
 
+# --- [수정됨] 삭제 로직을 비워둔 ScanFrame ---
 class ScanFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):
         super().__init__(master, corner_radius=0, fg_color="transparent")
-        ctk.CTkLabel(self, text="📄 개인정보 정밀 스캔", font=f_title).pack(pady=20, padx=20, anchor="w")
-        self.btn_start = ctk.CTkButton(self, text="내 PC 스캔 시작", height=50, font=f_body, fg_color="#E67E22", hover_color="#D35400")
-        self.btn_start.pack(pady=10, fill="x", padx=40)
-        self.scroll_frame = ctk.CTkScrollableFrame(self, label_text="검출된 파일 목록", label_font=f_body)
-        self.scroll_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        for i in range(5):
-            row = ctk.CTkFrame(self.scroll_frame)
-            row.pack(fill="x", pady=5)
-            ctk.CTkLabel(row, text=f"C:/Users/User/Desktop/secret_{i}.txt", font=f_body, anchor="w").pack(side="left", padx=10)
-            ctk.CTkButton(row, text="삭제", width=60, font=f_body, fg_color="#C0392B").pack(side="right", padx=5)
+        self.scanner = SensitiveDataScanner()
+        self.is_scanning = False
+        self.master_app = master 
+        self.current_alert_count = 0 
+        
+        self.cached_results = [] 
+        self.ignore_file = "scan_ignore_list.json"
+        self.ignore_list = self.load_ignore_list()
+
+        # UI 설정
+        ctk.CTkLabel(self, text="🕵️ 개인정보 스캐너", font=f_title).pack(pady=20, padx=20, anchor="w")
+        
+        self.btn_start = ctk.CTkButton(self, text="스캔 시작", height=50, fg_color="#E67E22", 
+                                     font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold"), 
+                                     command=self.start_thread)
+        self.btn_start.pack(fill="x", padx=40, pady=(10, 5))
+
+        self.var_show_ignored = ctk.BooleanVar(value=False)
+        self.chk_show_ignored = ctk.CTkCheckBox(self, text="사용자 설정에 의해 숨겨진(무시된) 파일도 포함", 
+                                                font=f_body, variable=self.var_show_ignored,
+                                                command=self.refresh_view) 
+        self.chk_show_ignored.pack(pady=5)
+
+        self.lbl_status = ctk.CTkLabel(self, text="준비됨", font=f_body)
+        self.lbl_status.pack(pady=5)
+        
+        # 프로그레스바 (일단 생성만 해둠)
+        self.progress = ctk.CTkProgressBar(self)
+        self.progress.set(0)
+
+        self.result_area = ctk.CTkScrollableFrame(self, label_text="스캔 결과", label_font=f_body)
+        self.result_area.pack(fill="both", expand=True, padx=20, pady=20)
+
+    def reset_ui(self):
+        self.is_scanning = False
+        self.cached_results = []
+        self.current_alert_count = 0
+        
+        self.btn_start.configure(state="normal", text="스캔 시작")
+        self.lbl_status.configure(text="준비됨")
+        
+        # 리셋 시 프로그레스바 숨기기
+        self.progress.set(0)
+        self.progress.pack_forget()
+        
+        self.var_show_ignored.set(False) 
+        
+        for widget in self.result_area.winfo_children():
+            widget.destroy()
+
+    def start_thread(self):
+        if self.is_scanning: return
+        self.is_scanning = True
+        self.btn_start.configure(state="disabled", text="스캔 중...")
+        
+        # [수정됨] before 옵션 에러 해결법: "뺐다가 다시 넣기"
+        self.result_area.pack_forget()             # 1. 결과창을 잠시 숨김
+        self.progress.pack(fill="x", padx=40, pady=5) # 2. 프로그레스바를 넣음 (이러면 맨 아래에 붙음)
+        self.result_area.pack(fill="both", expand=True, padx=20, pady=20) # 3. 결과창을 다시 넣음 (바 아래에 붙음)
+        
+        for widget in self.result_area.winfo_children(): widget.destroy()
+        threading.Thread(target=self.run_scan, daemon=True).start()
+
+    def run_scan(self):
+        try:
+            def update_progress(val):
+                self.progress.set(val / 100)
+                self.lbl_status.configure(text=f"검사 중... {val}%")
+            
+            results = self.scanner.start_scan(update_progress)
+            self.after(0, lambda: self.show_results(results))
+        except Exception as e:
+            # 에러 발생 시 처리
+            print(f"스캔 오류: {e}")
+            self.after(0, lambda: self.handle_scan_error(e))
+
+    def handle_scan_error(self, error_msg):
+        self.reset_ui() 
+        messagebox.showerror("스캔 오류", f"스캔 도중 문제가 발생하여 중단되었습니다.\n\n[에러 내용]\n{error_msg}")
+
+    # --- 아래는 기존과 동일 ---
+    def load_ignore_list(self):
+        if not os.path.exists(self.ignore_file): return []
+        try:
+            with open(self.ignore_file, "r", encoding="utf-8") as f: return json.load(f)
+        except: return []
+
+    def save_ignore_list(self):
+        try:
+            with open(self.ignore_file, "w", encoding="utf-8") as f:
+                json.dump(self.ignore_list, f, ensure_ascii=False, indent=4)
+        except Exception as e: print(f"저장 실패: {e}")
+
+    def refresh_view(self):
+        if self.cached_results:
+            self.show_results(self.cached_results)
+
+    def request_secure_delete(self, file_path, card_widget):
+        messagebox.showinfo("알림", "보안 삭제 모듈 연동 예정")
+
+    def dismiss_card_permanently(self, file_path, card_widget):
+        if not messagebox.askyesno("검사 예외 처리", f"이 파일을 무시하시겠습니까?\n(체크박스를 켜야 다시 볼 수 있습니다)"):
+            return
+        if file_path not in self.ignore_list:
+            self.ignore_list.append(file_path)
+            self.save_ignore_list()
+        self.refresh_view()
+
+    def restore_card(self, file_path):
+        if file_path in self.ignore_list:
+            self.ignore_list.remove(file_path)
+            self.save_ignore_list()
+            messagebox.showinfo("복원 완료", "이제 이 파일은 다시 위험 항목으로 탐지됩니다.")
+            self.refresh_view()
+
+    def show_results(self, results):
+        self.is_scanning = False
+        self.cached_results = results 
+        self.btn_start.configure(state="normal", text="다시 스캔하기")
+        
+        # 완료되면 프로그레스바 숨기기
+        self.progress.pack_forget()
+
+        filtered_results = []
+        for item in results:
+            if self.var_show_ignored.get():
+                filtered_results.append(item) 
+            else:
+                if item['file_path'] not in self.ignore_list:
+                    filtered_results.append(item) 
+        
+        self.current_alert_count = 0
+        for item in filtered_results:
+            if item['file_path'] not in self.ignore_list:
+                self.current_alert_count += 1
+        
+        status_msg = f"분석 완료! {len(filtered_results)}개의 파일 표시 중"
+        if self.var_show_ignored.get():
+             status_msg += " (무시된 파일 포함)"
+        self.lbl_status.configure(text=status_msg)
+        
+        try:
+            self.master_app.dashboard_frame.update_scan_ui(self.current_alert_count)
+        except: pass
+
+        for widget in self.result_area.winfo_children(): widget.destroy()
+
+        if not filtered_results:
+            msg = "안전합니다! 발견된 정보가 없습니다."
+            if len(results) > 0: msg += "\n(숨겨진 파일이 있습니다. 체크박스를 확인하세요)"
+            ctk.CTkLabel(self.result_area, text=msg).pack(pady=20)
+            return
+
+        filtered_results.sort(key=lambda x: 0 if any(d['level'] == 'danger' for d in x['detections']) else 1)
+        type_map = {'password': '비밀번호', 'pw': '비밀번호', 'jumin': '주민등록번호', 'phone': '전화번호', 'email': '이메일'}
+
+        def create_card(item):
+            detections = item['detections']
+            file_path = item['file_path']
+            is_ignored = file_path in self.ignore_list 
+
+            is_danger = any(d['level'] == 'danger' for d in detections)
+            risk_level = 'danger' if is_danger else 'warning'
+            
+            summary_text = f"총 {len(detections)}건의 개인정보 발견"
+            if is_ignored: summary_text = "[무시됨] " + summary_text 
+
+            full_detail_text = f"[전체 경로]\n{file_path}\n\n[상세 탐지 내역]\n"
+            for d in detections:
+                korean_type = type_map.get(d['type'], d['type'])
+                full_detail_text += f"• [{d['line']}번째 줄] {korean_type}: {d['content'].strip()}\n"
+
+            if is_ignored:
+                icon, card_color, text_color, reason_color = "🚫 숨김", "#424949", "#BDC3C7", "#95A5A6"
+            elif risk_level == 'danger':
+                icon, card_color, text_color, reason_color = "🚨 위험", "#561818", "#FF9999", "#FFCCCC"
+            else:
+                icon, card_color, text_color, reason_color = "⚠️ 의심", "#564618", "#F5D0A9", "#FFF5E0"
+
+            card = ctk.CTkFrame(self.result_area, fg_color=card_color)
+            card.pack(fill="x", pady=3, padx=5)
+
+            header = ctk.CTkFrame(card, fg_color="transparent")
+            header.pack(fill="x", padx=5, pady=5)
+
+            ctk.CTkLabel(header, text=icon, width=60, font=("Malgun Gothic", 12, "bold"), 
+                         text_color=text_color).pack(side="left", anchor="n")
+
+            info_frame = ctk.CTkFrame(header, fg_color="transparent")
+            info_frame.pack(side="left", fill="both", expand=True, padx=5)
+
+            ctk.CTkLabel(info_frame, text=os.path.basename(file_path), font=("Malgun Gothic", 13, "bold"), 
+                         anchor="w", text_color="white").pack(fill="x")
+            
+            ctk.CTkLabel(info_frame, text=f"🔎 {summary_text}", 
+                                     font=("Malgun Gothic", 11), text_color=reason_color, anchor="w").pack(fill="x")
+
+            detail_frame = ctk.CTkFrame(card, fg_color="#2B2B2B", corner_radius=5)
+            ctk.CTkLabel(detail_frame, text=full_detail_text, 
+                         font=("Malgun Gothic", 12), text_color="white", justify="left", anchor="w",
+                         wraplength=400).pack(padx=10, pady=10, fill="x")
+
+            def toggle_details():
+                if detail_frame.winfo_viewable():
+                    detail_frame.pack_forget()
+                    btn_toggle.configure(text="▼")
+                else:
+                    detail_frame.pack(fill="x", padx=10, pady=(0, 10))
+                    btn_toggle.configure(text="▲")
+
+            btn_frame = ctk.CTkFrame(header, fg_color="transparent")
+            btn_frame.pack(side="right")
+
+            btn_toggle = ctk.CTkButton(btn_frame, text="▼", width=30, height=30, fg_color="transparent", 
+                                       border_width=1, border_color=text_color, text_color=text_color,
+                                       command=toggle_details)
+            btn_toggle.pack(side="right", padx=2)
+
+            ctk.CTkButton(btn_frame, text="삭제", width=50, height=30, fg_color="#C0392B", hover_color="#922B21",
+                          command=lambda p=file_path, c=card: self.request_secure_delete(p, c)).pack(side="right", padx=2)
+            
+            if is_ignored:
+                ctk.CTkButton(btn_frame, text="복원", width=50, height=30, fg_color="#27AE60", hover_color="#2ECC71",
+                              command=lambda p=file_path: self.restore_card(p)).pack(side="right", padx=2)
+            else:
+                ctk.CTkButton(btn_frame, text="무시", width=50, height=30, fg_color="#7F8C8D", hover_color="#95A5A6",
+                              command=lambda p=file_path, c=card: self.dismiss_card_permanently(p, c)).pack(side="right", padx=2)
+
+            ctk.CTkButton(btn_frame, text="열기", width=50, height=30, fg_color="#3498DB",
+                          command=lambda p=file_path: os.startfile(os.path.dirname(p))).pack(side="right", padx=2)
+
+        for item in filtered_results:
+            create_card(item)
 
 class WipeFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):

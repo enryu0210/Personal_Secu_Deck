@@ -212,3 +212,6 @@ Thumbs.db
 
 # startup snapshot
 startup_snapshot.json
+
+# 개인정보 스캐너 - 사용자 무시 목록 제외
+scan_ignore_list.json
