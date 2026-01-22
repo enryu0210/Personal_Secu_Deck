@@ -1,5 +1,6 @@
 import customtkinter as ctk
 import os
+from startup_checker import StartupMonitor
 
 # --- 초기 설정 ---
 ctk.set_appearance_mode("Dark")
@@ -50,6 +51,20 @@ class App(ctk.CTk):
 
         self.select_frame_by_name("dashboard")
 
+        self.run_startup_check()
+
+    def run_startup_check(self):
+        # 1. 감시자(Monitor) 소환해서 검사 실행
+        monitor = StartupMonitor()
+        status, new_items = monitor.check_for_changes()
+        
+        # 2. 대시보드 업데이트 (방금 만든 함수 호출)
+        self.dashboard_frame.update_startup_ui(status, len(new_items))
+        
+        # 3. 상세 탭(StartupFrame) 업데이트
+        # (StartupFrame에 있던 run_check 대신 여기서 결과를 바로 주입)
+        self.startup_frame.update_ui(status, new_items)
+
     def create_sidebar_button(self, text, command, row):
         btn = ctk.CTkButton(self.sidebar_frame, text=text, command=command, 
                             font=self.font_bold,
@@ -96,7 +111,9 @@ class DashboardFrame(ctk.CTkFrame):
         self.create_clickable_card(0, 0, "⚠️ 개인정보 노출", "3건 발견됨\n(메모장 내 비밀번호)", "#C0392B", f_sub, f_body, command=self.app.show_scan)
         self.create_clickable_card(0, 1, "🔒 보안 삭제 도구", "파일을 안전하게\n파쇄할 준비 완료", "#2980B9", f_sub, f_body, command=self.app.show_wipe)
         self.create_clickable_card(1, 0, "🧹 디지털 청소", "1.2GB 정리 가능\n(다운로드 폴더)", "#D35400", f_sub, f_body, command=self.app.show_clean)
-        self.create_clickable_card(1, 1, "✅ 시작 프로그램", "변동 사항 없음\n(부팅 최적화)", "#27AE60", f_sub, f_body, command=self.app.show_startup)
+        self.card_startup, self.lbl_startup_title, self.lbl_startup_content = self.create_clickable_card(
+            1, 1, "✅ 시작 프로그램", "검사 중...", "#27AE60", f_sub, f_body, command=self.app.show_startup
+        )
         
     def create_clickable_card(self, row, col, title, content, color, f_sub, f_body, command):
         # 1. 카드 프레임 생성
@@ -128,6 +145,23 @@ class DashboardFrame(ctk.CTkFrame):
             widget.bind("<Enter>", on_enter)   # 마우스 들어옴
             widget.bind("<Leave>", on_leave)   # 마우스 나감
             widget.bind("<Button-1>", on_click) # 왼쪽 클릭
+
+        return card, lbl_t, lbl_c
+    
+    # [핵심] 대시보드 상태를 업데이트하는 함수 추가
+    def update_startup_ui(self, status, count):
+        if status == "SAFE":
+            self.card_startup.configure(border_color="#27AE60") # 초록
+            self.lbl_startup_title.configure(text="✅ 시작 프로그램", text_color="#27AE60")
+            self.lbl_startup_content.configure(text="안전함 (변동 없음)")
+        elif status == "WARNING":
+            self.card_startup.configure(border_color="#C0392B") # 빨강
+            self.lbl_startup_title.configure(text="🚨 시작 프로그램", text_color="#C0392B")
+            self.lbl_startup_content.configure(text=f"{count}개의 변경 감지됨!\n확인이 필요합니다.")
+        elif status == "FIRST_RUN":
+            self.card_startup.configure(border_color="#2980B9") # 파랑
+            self.lbl_startup_title.configure(text="ℹ️ 감시 시작", text_color="#2980B9")
+            self.lbl_startup_content.configure(text="기준 스냅샷 생성 완료")
 
 
 # --- 나머지 프레임들은 동일 ---
@@ -172,15 +206,89 @@ class CleanFrame(ctk.CTkFrame):
 class StartupFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):
         super().__init__(master, corner_radius=0, fg_color="transparent")
+        
+        self.monitor = StartupMonitor()
+        self.f_body = f_body # 폰트 저장해둠
+        
         ctk.CTkLabel(self, text="🚀 시작 프로그램 감시", font=f_title).pack(pady=20, padx=20, anchor="w")
-        self.status_box = ctk.CTkFrame(self, fg_color="#1E8449", corner_radius=10, height=100)
+        
+        # 1. 상태 박스
+        self.status_box = ctk.CTkFrame(self, fg_color="gray", corner_radius=10, height=80)
         self.status_box.pack(fill="x", padx=20, pady=10)
-        ctk.CTkLabel(self.status_box, text="✅ 현재 시스템은 안전합니다.", font=ctk.CTkFont(family="Malgun Gothic", size=18, weight="bold"), text_color="white").place(relx=0.5, rely=0.5, anchor="center")
-        ctk.CTkLabel(self, text="[수동 관리 가이드]", font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold")).pack(pady=(30, 10), anchor="w", padx=20)
-        self.txt_guide = ctk.CTkTextbox(self, height=150, font=f_body)
-        self.txt_guide.pack(fill="x", padx=20)
-        self.txt_guide.insert("0.0", "작업 관리자 -> 시작 앱 탭에서 관리하세요.")
-        self.txt_guide.configure(state="disabled")
+        
+        self.lbl_status = ctk.CTkLabel(self.status_box, text="검사 중...", font=ctk.CTkFont(family="Malgun Gothic", size=18, weight="bold"), text_color="white")
+        self.lbl_status.place(relx=0.5, rely=0.5, anchor="center")
+        
+        # 2. 감지된 항목 리스트 (여기에 버튼이 들어감)
+        self.lbl_warning_detail = ctk.CTkLabel(self, text="[새로 발견된 프로그램 - 승인 필요]", text_color="#E74C3C", font=f_body)
+        # 스크롤 가능한 프레임으로 변경 (버튼을 넣기 위해)
+        self.scroll_list = ctk.CTkScrollableFrame(self, height=200, label_text="감지 목록")
+        
+        # 3. 수동 검사 버튼
+        self.btn_refresh = ctk.CTkButton(self, text="🔄 다시 검사하기", command=self.run_manual_check, font=f_body, fg_color="#555555")
+        self.btn_refresh.pack(side="bottom", pady=20)
+
+    def run_manual_check(self):
+        # 수동 버튼 눌렀을 때 실행
+        status, new_items = self.monitor.check_for_changes()
+        self.update_ui(status, new_items)
+
+    def update_ui(self, status, new_items):
+        # UI 초기화 (기존 목록 지우기)
+        self.lbl_warning_detail.pack_forget()
+        self.scroll_list.pack_forget()
+        for widget in self.scroll_list.winfo_children():
+            widget.destroy()
+
+        if status == "SAFE":
+            self.status_box.configure(fg_color="#1E8449") # 초록
+            self.lbl_status.configure(text="✅ 현재 시스템은 안전합니다.")
+            
+        elif status == "FIRST_RUN":
+            self.status_box.configure(fg_color="#2980B9") # 파랑
+            self.lbl_status.configure(text="ℹ️ 기준 스냅샷을 생성했습니다.")
+            
+        elif status == "WARNING":
+            self.status_box.configure(fg_color="#C0392B") # 빨강
+            self.lbl_status.configure(text=f"🚨 {len(new_items)}개의 새로운 시작프로그램 감지!")
+            
+            # 리스트 보여주기
+            self.lbl_warning_detail.pack(pady=(10, 5))
+            self.scroll_list.pack(fill="x", padx=20)
+            
+            # [핵심] 각 아이템마다 '승인' 버튼 생성
+            for item in new_items:
+                self.create_item_row(item)
+
+    def create_item_row(self, item):
+        row = ctk.CTkFrame(self.scroll_list)
+        row.pack(fill="x", pady=5)
+        
+        # 프로그램 정보 (이름, 경로)
+        info_text = f"{item['name']}\n({item['path']})"
+        ctk.CTkLabel(row, text=info_text, anchor="w", font=self.f_body).pack(side="left", padx=10, pady=5)
+        
+        # 승인 버튼
+        btn_approve = ctk.CTkButton(
+            row, 
+            text="승인 (안전함)", 
+            width=100, 
+            fg_color="#27AE60", 
+            hover_color="#2ECC71",
+            command=lambda: self.approve_item(item)
+        )
+        btn_approve.pack(side="right", padx=10)
+
+    def approve_item(self, item):
+        # 1. 로직에게 "이거 저장해!"라고 명령
+        success = self.monitor.approve_new_program(item['name'], item['path'])
+        
+        if success:
+            # 2. 성공했으면 화면 갱신 (다시 검사하면 이제 SAFE로 뜰 것임)
+            print(f"승인 완료: {item['name']}")
+            self.run_manual_check() # UI 업데이트
+        else:
+            print("승인 실패")
 
 class AIFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):
