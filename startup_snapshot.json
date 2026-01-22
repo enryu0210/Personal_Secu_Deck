@@ -1,0 +1,20 @@
+{
+    "OneDrive": "\"C:\\Program Files\\Microsoft OneDrive\\OneDrive.exe\" /background",
+    "NZXT.CAM": "C:\\Program Files\\NZXT CAM\\NZXT CAM.exe --startup",
+    "RazerAppEngine": "\"C:\\Program Files\\Razer\\RazerAppEngine\\RazerAppEngine.exe\" --url-params=apps=synapse --launch-force-hidden=synapse --autoStart=1",
+    "WaveLinkSE": "C:\\Program Files\\Elgato\\WaveLink\\WaveLinkSE.exe",
+    "Steam": "\"C:\\Program Files (x86)\\Steam\\steam.exe\" -silent",
+    "KakaoTalk": "\"C:\\Program Files (x86)\\Kakao\\KakaoTalk\\KakaoTalk.exe\" -bystartup",
+    "RiotClient": "C:\\Riot Games\\Riot Client\\RiotClientServices.exe --launch-background-mode",
+    "Discord": "\"C:\\Users\\User\\AppData\\Local\\Discord\\Update.exe\" --processStart Discord.exe",
+    "electron.app.Notion": "C:\\Users\\User\\AppData\\Local\\Programs\\Notion\\Notion.exe --open-at-login",
+    "GoogleDriveFS": "\"C:\\Program Files\\Google\\Drive File Stream\\119.0.2.0\\GoogleDriveFS.exe\" --startup_mode",
+    "Battle.net": "\"C:\\Program Files (x86)\\Battle.net\\Battle.net.exe\" --autostarted",
+    "SOOPPackage": "\"C:\\Users\\User\\AppData\\Local\\SOOP\\SOOPPackage.exe\"",
+    "electron.app.BlueStacks Services": "C:\\Users\\User\\AppData\\Local\\Programs\\bluestacks-services\\BlueStacksServices.exe --hidden",
+    "MicrosoftEdgeAutoLaunch_C46CFC0629905CC775E70B50EA8A519C": "\"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe\" --no-startup-window --win-session-start",
+    "Stream Deck": "\"C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe\" --runinbk",
+    "Volume Controller SD plugin": "C:\\Program Files\\Elgato\\Volume Controller\\ElgatoAudioControlServerWatcher.exe",
+    "Wave Link": "C:\\Program Files\\Elgato\\WaveLink\\WaveLink.exe -runinbk",
+    "MyTestVirus": "C:\\Windows\\System32\\calc.exe"
+}
