@@ -596,13 +596,19 @@ class WipeFrame(ctk.CTkFrame):
         self.btn_run.configure(state="normal")
         self.btn_select.configure(state="normal")
         self.btn_clear.configure(state="normal")
-        self.progress.set(0)
 
         if status == "SUCCESS":
+            self.progress.set(1.0)               # ✅ 완료 상태 유지
             self.lbl_status.configure(text="✅ 삭제 완료")
-            messagebox.showinfo("완료", "삭제가 완료되었습니다.")
-            self.clear_file()
+            self.update_idletasks()               # ✅ UI 즉시 반영
+
+            messagebox.showinfo("완료", "보안 삭제가 완료되었습니다.")
+            self.clear_file()                     # ✅ 여기서 progress 0으로 리셋
             return
+        
+        # ❌ 실패한 경우
+        self.lbl_status.configure(text=f"❌ 삭제 실패: {status}")
+        self.update_idletasks()
 
         # 실패 사유별 메시지
         if status == "IN_USE":
@@ -614,7 +620,9 @@ class WipeFrame(ctk.CTkFrame):
         elif status == "NOT_FOUND":
             messagebox.showerror("실패", "파일을 찾을 수 없습니다.")
         else:
-            messagebox.showerror("실패", f"삭제 실패: {status}")
+            messagebox.showerror("실패", f"삭제 실패: {detail}")
+
+        self.progress.set(0.0)   # ✅ 실패했을 때만 리셋
 
         # 디버깅용 detail은 필요할 때만 띄워도 됨
         # print("wipe detail:", detail)
