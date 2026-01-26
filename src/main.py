@@ -3,8 +3,10 @@ import os
 import threading
 import json
 from tkinter import messagebox
+from tkinter import filedialog
 from startup_checker import StartupMonitor
 from scanner import SensitiveDataScanner
+from secure_wiper import SecureWiper
 
 # --- 초기 설정 ---
 ctk.set_appearance_mode("Dark")
@@ -428,12 +430,196 @@ class ScanFrame(ctk.CTkFrame):
 class WipeFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):
         super().__init__(master, corner_radius=0, fg_color="transparent")
+
+        self.wiper = SecureWiper(chunk_size=1024 * 1024)  # 1MB
+        self.is_wiping = False
+        self.selected_path = None
+
         ctk.CTkLabel(self, text="🔒 완전 보안 삭제 (디지털 세탁소)", font=f_title).pack(pady=20, padx=20, anchor="w")
-        self.drop_zone = ctk.CTkFrame(self, border_width=2, border_color="gray", corner_radius=20, fg_color=("#E0E0E0", "#2B2B2B"))
-        self.drop_zone.pack(fill="both", expand=True, padx=40, pady=20)
-        ctk.CTkLabel(self.drop_zone, text="이곳에 파일을 드래그하세요", font=f_title).place(relx=0.5, rely=0.4, anchor="center")
-        self.btn_select = ctk.CTkButton(self.drop_zone, text="파일 선택하기", font=f_body, command=lambda: print("클릭"))
-        self.btn_select.place(relx=0.5, rely=0.6, anchor="center")
+
+        # 안내 박스
+        info = ctk.CTkFrame(self, fg_color="#2B2B2B", corner_radius=12)
+        info.pack(fill="x", padx=20, pady=(0, 10))
+
+        ctk.CTkLabel(
+            info,
+            text="• 3-pass 방식: 0으로 덮기 → 1로 덮기 → 난수로 덮기 → 삭제\n"
+                 "• 파일이 사용 중이면 실패 알림\n"
+                 "• 관리자 권한이 필요한 시스템 파일은 삭제 거부(안전장치)",
+            font=f_body,
+            justify="left",
+            text_color="#DCE4EE"
+        ).pack(padx=14, pady=12, anchor="w")
+
+        # 드롭존(현재는 '선택 UI 중심' - 드래그&드롭은 옵션 패치 참고)
+        self.drop_zone = ctk.CTkFrame(
+            self,
+            border_width=2,
+            border_color="gray",
+            corner_radius=20,
+            fg_color=("#E0E0E0", "#2B2B2B"),
+            height=220
+        )
+        self.drop_zone.pack(fill="x", padx=20, pady=10)
+        self.drop_zone.pack_propagate(False)
+
+        self.lbl_drop = ctk.CTkLabel(self.drop_zone, text="이곳에 파일을 드래그(옵션)하거나\n아래 버튼으로 파일을 선택하세요",
+                                     font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold"))
+        self.lbl_drop.place(relx=0.5, rely=0.35, anchor="center")
+
+        self.btn_select = ctk.CTkButton(
+            self.drop_zone,
+            text="📁 파일 선택하기",
+            font=f_body,
+            height=42,
+            command=self.pick_file
+        )
+        self.btn_select.place(relx=0.5, rely=0.62, anchor="center")
+
+        # 선택된 파일 표시
+        path_row = ctk.CTkFrame(self, fg_color="transparent")
+        path_row.pack(fill="x", padx=20, pady=(6, 0))
+
+        ctk.CTkLabel(path_row, text="선택된 파일:", font=f_body).pack(side="left")
+        self.entry_path = ctk.CTkEntry(path_row, placeholder_text="파일을 선택하세요", font=f_body)
+        self.entry_path.pack(side="left", fill="x", expand=True, padx=(10, 10))
+        self.entry_path.configure(state="disabled")
+
+        self.btn_clear = ctk.CTkButton(path_row, text="지우기", width=90, fg_color="#555555",
+                                       font=f_body, command=self.clear_file)
+        self.btn_clear.pack(side="right")
+
+        # 진행 상태
+        self.lbl_status = ctk.CTkLabel(self, text="준비됨", font=f_body)
+        self.lbl_status.pack(padx=20, pady=(10, 2), anchor="w")
+
+        self.progress = ctk.CTkProgressBar(self)
+        self.progress.set(0)
+        self.progress.pack(fill="x", padx=20, pady=(0, 10))
+
+        # 실행 버튼
+        self.btn_run = ctk.CTkButton(
+            self,
+            text="🧺 영구 삭제 시작",
+            height=48,
+            font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold"),
+            fg_color="#2980B9",
+            hover_color="#1F618D",
+            command=self.confirm_and_start
+        )
+        self.btn_run.pack(fill="x", padx=20, pady=(8, 18))
+
+    # ---------- UI Helpers ----------
+    def set_path(self, path: str):
+        self.selected_path = path
+        self.entry_path.configure(state="normal")
+        self.entry_path.delete(0, "end")
+        self.entry_path.insert(0, path)
+        self.entry_path.configure(state="disabled")
+
+    def clear_file(self):
+        if self.is_wiping:
+            messagebox.showinfo("알림", "삭제 진행 중에는 변경할 수 없습니다.")
+            return
+        self.selected_path = None
+        self.entry_path.configure(state="normal")
+        self.entry_path.delete(0, "end")
+        self.entry_path.configure(state="disabled")
+        self.progress.set(0)
+        self.lbl_status.configure(text="준비됨")
+
+    def pick_file(self):
+        if self.is_wiping:
+            messagebox.showinfo("알림", "삭제 진행 중에는 변경할 수 없습니다.")
+            return
+        path = filedialog.askopenfilename()
+        if path:
+            self.set_path(path)
+
+    # ---------- Workflow ----------
+    def confirm_and_start(self):
+        if self.is_wiping:
+            return
+
+        path = (self.selected_path or "").strip()
+        if not path:
+            messagebox.showwarning("안내", "먼저 삭제할 파일을 선택하세요.")
+            return
+
+        if not os.path.isfile(path):
+            messagebox.showwarning("안내", "일반 파일만 삭제할 수 있습니다.")
+            return
+
+        # 확인 팝업
+        ok = messagebox.askyesno(
+            "정말 영구 삭제할까요?",
+            "⚠️ 이 작업은 되돌릴 수 없습니다.\n\n"
+            "3-pass(0→1→난수) 덮어쓰기 후 파일을 삭제합니다.\n"
+            "진행하시겠습니까?"
+        )
+        if not ok:
+            return
+
+        # 시작
+        self.is_wiping = True
+        self.btn_run.configure(state="disabled")
+        self.btn_select.configure(state="disabled")
+        self.btn_clear.configure(state="disabled")
+        self.progress.set(0)
+        self.lbl_status.configure(text="삭제 준비 중...")
+
+        threading.Thread(target=self._wipe_thread, args=(path,), daemon=True).start()
+
+    def _wipe_thread(self, path: str):
+        # stage -> 화면 표시용
+        stage_map = {
+            "PASS1_ZERO": "PASS 1/3: 0으로 덮는 중",
+            "PASS2_ONE": "PASS 2/3: 1로 덮는 중",
+            "PASS3_RANDOM": "PASS 3/3: 난수로 덮는 중",
+        }
+
+        def progress_cb(written, total, stage):
+            pct = 0 if total == 0 else (written / total)
+            text = stage_map.get(stage, stage)
+            self.after(0, lambda: self._update_progress(pct, text))
+
+        status, detail = self.wiper.wipe_file(path, progress_cb=progress_cb)
+
+        self.after(0, lambda: self._finish(status, detail))
+
+    def _update_progress(self, pct: float, text: str):
+        self.progress.set(max(0.0, min(1.0, pct)))
+        self.lbl_status.configure(text=f"{text}... {int(pct*100)}%")
+
+    def _finish(self, status: str, detail: str):
+        self.is_wiping = False
+        self.btn_run.configure(state="normal")
+        self.btn_select.configure(state="normal")
+        self.btn_clear.configure(state="normal")
+        self.progress.set(0)
+
+        if status == "SUCCESS":
+            self.lbl_status.configure(text="✅ 삭제 완료")
+            messagebox.showinfo("완료", "삭제가 완료되었습니다.")
+            self.clear_file()
+            return
+
+        # 실패 사유별 메시지
+        if status == "IN_USE":
+            messagebox.showerror("실패", "다른 프로그램에서 사용 중인 파일이라 삭제에 실패했습니다.")
+        elif status == "PERMISSION":
+            messagebox.showerror("거부", "권한 부족(관리자 권한/보호 파일)으로 삭제가 거부되었습니다.")
+        elif status == "SYSTEM_BLOCKED":
+            messagebox.showwarning("거부", "시스템 보호 파일/경로는 삭제가 거부됩니다.")
+        elif status == "NOT_FOUND":
+            messagebox.showerror("실패", "파일을 찾을 수 없습니다.")
+        else:
+            messagebox.showerror("실패", f"삭제 실패: {status}")
+
+        # 디버깅용 detail은 필요할 때만 띄워도 됨
+        # print("wipe detail:", detail)
+        self.lbl_status.configure(text=f"❌ 실패: {status}")
+
 
 class CleanFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):
