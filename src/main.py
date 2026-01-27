@@ -1,10 +1,17 @@
 import customtkinter as ctk
 import os
 import threading
+import time
+import queue
+import tempfile
+import math
 import json
+from pathlib import Path
+from datetime import datetime
 from tkinter import messagebox
 from tkinter import filedialog
 from startup_checker import StartupMonitor
+from Cleaner import scan_dormant_files, summarize, delete_files, human_size, DormantFile, CleanerScanner, classify_delete_safety
 from scanner import SensitiveDataScanner
 from secure_wiper import SecureWiper
 
@@ -47,7 +54,6 @@ class App(ctk.CTk):
         self.btn_ai = self.create_sidebar_button("🤖 AI 보안 자문", self.show_ai, 6)
 
         # 4. 프레임 초기화
-        # DashboardFrame에 '앱(self)' 자체를 넘겨서, 앱의 함수(show_scan 등)를 호출할 수 있게 함
         self.dashboard_frame = DashboardFrame(self, self.font_title, self.font_subtitle, self.font_body, app_instance=self)
         self.scan_frame = ScanFrame(self, self.font_title, self.font_body)
         self.wipe_frame = WipeFrame(self, self.font_title, self.font_body)
@@ -55,53 +61,119 @@ class App(ctk.CTk):
         self.startup_frame = StartupFrame(self, self.font_title, self.font_body)
         self.ai_frame = AIFrame(self, self.font_title, self.font_body)
 
+        # Cleaner scan worker references (so we can stop/replace safely)
+        self._cleaner_scanner = None
+        self._cleaner_thread = None
+
         self.select_frame_by_name("dashboard")
 
+        # 시작프로그램은 앱 시작 시 1회 검사(요청 반영: '디지털 청소' 자동 스캔은 제거)
         self.run_startup_check()
 
     def run_startup_check(self):
-        # 1. 감시자(Monitor) 소환해서 검사 실행
         monitor = StartupMonitor()
         status, new_items = monitor.check_for_changes()
-        
-        # 2. 대시보드 업데이트 (방금 만든 함수 호출)
+
+        # 대시보드 + 상세 탭 동시 갱신
         self.dashboard_frame.update_startup_ui(status, len(new_items))
-        
-        # 3. 상세 탭(StartupFrame) 업데이트
-        # (StartupFrame에 있던 run_check 대신 여기서 결과를 바로 주입)
         self.startup_frame.update_ui(status, new_items)
 
+    # App 클래스 내부
+    def stop_cleaner_scan(self):
+        """Stop any in-flight cleaner scan (best-effort)."""
+        scanner = getattr(self, "_cleaner_scanner", None)
+        if scanner is not None:
+            try:
+                scanner.stop()
+            except Exception:
+                pass
+        self._cleaner_scanner = None
+        self._cleaner_thread = None
+
+
+    def run_cleaner_check(self, days=30, ignore_tiny=True, include_temp=True):
+        """CleanerScanner를 백그라운드로 돌리고 CleanFrame에 큐를 연결"""
+        # If a previous scan exists, stop it first
+        self.stop_cleaner_scan()
+        min_size = 1024 if ignore_tiny else 0
+        q = queue.Queue()
+
+        scanner = CleanerScanner(
+            q,
+            days=days,
+            min_size_bytes=min_size,
+            include_downloads=True,
+            include_temp=include_temp,
+        )
+
+        self._cleaner_scanner = scanner
+
+        t = threading.Thread(
+            target=scanner.run_scan,
+            kwargs=dict(
+                days=days,
+                ignore_tiny=ignore_tiny,
+                include_downloads=True,
+                include_temp=include_temp,
+            ),
+            daemon=True,
+        )
+        self._cleaner_thread = t
+        t.start()
+
+        # UI는 메인스레드에서 시작
+        self.after(0, lambda: self.clean_frame.begin_scan(q, days=days, ignore_tiny=ignore_tiny, include_temp=include_temp))
+
     def create_sidebar_button(self, text, command, row):
-        btn = ctk.CTkButton(self.sidebar_frame, text=text, command=command, 
-                            font=self.font_bold,
-                            fg_color="transparent", text_color=("gray10", "#DCE4EE"), 
-                            hover_color=("gray70", "gray30"), anchor="w", height=40)
+        btn = ctk.CTkButton(
+            self.sidebar_frame,
+            text=text,
+            command=command,
+            font=self.font_bold,
+            fg_color="transparent",
+            text_color=("gray10", "#DCE4EE"),
+            hover_color=("gray70", "gray30"),
+            anchor="w",
+            height=40,
+        )
         btn.grid(row=row, column=0, sticky="ew", padx=10, pady=5)
         return btn
 
     def select_frame_by_name(self, name):
         for frame in [self.dashboard_frame, self.scan_frame, self.wipe_frame, self.clean_frame, self.startup_frame, self.ai_frame]:
             frame.grid_forget()
-        
-        if name == "dashboard": self.dashboard_frame.grid(row=0, column=1, sticky="nsew")
-        elif name == "scan": 
+
+        if name == "dashboard":
+            self.dashboard_frame.grid(row=0, column=1, sticky="nsew")
+        elif name == "scan":
             self.scan_frame.grid(row=0, column=1, sticky="nsew")
-            self.scan_frame.reset_ui()
-        elif name == "wipe": self.wipe_frame.grid(row=0, column=1, sticky="nsew")
-        elif name == "clean": self.clean_frame.grid(row=0, column=1, sticky="nsew")
-        elif name == "startup": self.startup_frame.grid(row=0, column=1, sticky="nsew")
-        elif name == "ai": self.ai_frame.grid(row=0, column=1, sticky="nsew")
+        elif name == "wipe":
+            self.wipe_frame.grid(row=0, column=1, sticky="nsew")
+        elif name == "clean":
+            self.clean_frame.grid(row=0, column=1, sticky="nsew")
+        elif name == "startup":
+            self.startup_frame.grid(row=0, column=1, sticky="nsew")
+        elif name == "ai":
+            self.ai_frame.grid(row=0, column=1, sticky="nsew")
 
-    def show_dashboard(self): self.select_frame_by_name("dashboard")
-    def show_scan(self): self.select_frame_by_name("scan")
-    def show_wipe(self): self.select_frame_by_name("wipe")
-    def show_clean(self): self.select_frame_by_name("clean")
-    def show_startup(self): self.select_frame_by_name("startup")
-    def show_ai(self): self.select_frame_by_name("ai")
+    def show_dashboard(self):
+        self.select_frame_by_name("dashboard")
 
+    def show_scan(self):
+        self.select_frame_by_name("scan")
 
-# --- 핵심 수정: 클릭 가능한 카드 기능이 추가된 DashboardFrame ---
+    def show_wipe(self):
+        self.select_frame_by_name("wipe")
 
+    def show_clean(self):
+        self.select_frame_by_name("clean")
+        self.clean_frame.ensure_scanned()
+
+    def show_startup(self):
+        self.select_frame_by_name("startup")
+
+    def show_ai(self):
+        self.select_frame_by_name("ai")
 class DashboardFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_sub, f_body, app_instance):
         super().__init__(master, corner_radius=0, fg_color="transparent")
@@ -120,7 +192,9 @@ class DashboardFrame(ctk.CTkFrame):
             0, 0, "❓ 개인정보 스캔", "스캔이 필요합니다.", "#E67E22", f_sub, f_body, command=self.app.show_scan
         )
         self.create_clickable_card(0, 1, "🔒 보안 삭제 도구", "파일을 안전하게\n파쇄할 준비 완료", "#2980B9", f_sub, f_body, command=self.app.show_wipe)
-        self.create_clickable_card(1, 0, "🧹 디지털 청소", "1.2GB 정리 가능\n(다운로드 폴더)", "#D35400", f_sub, f_body, command=self.app.show_clean)
+        self.card_clean, self.lbl_clean_title, self.lbl_clean_content = self.create_clickable_card(
+        1, 0, "🧹 디지털 청소", "검사 하기", "#D35400", f_sub, f_body, command=self.app.show_clean
+        )
         self.card_startup, self.lbl_startup_title, self.lbl_startup_content = self.create_clickable_card(
             1, 1, "✅ 시작 프로그램", "검사 중...", "#27AE60", f_sub, f_body, command=self.app.show_startup
         )
@@ -185,8 +259,22 @@ class DashboardFrame(ctk.CTkFrame):
             self.card_scan.configure(border_color="#27AE60")
             self.lbl_scan_title.configure(text="✅ 개인정보 안전", text_color="#27AE60")
             self.lbl_scan_content.configure(text="발견된 개인정보가\n없습니다.")
+        
+    def update_clean_ui(self, summary: dict):
+        count = summary.get("count", 0)
+        total = summary.get("total_human", "0 B")
+        d = summary.get("downloads_human", "0 B")
+        t = summary.get("temp_human", "0 B")
 
-
+        if count == 0:
+            self.card_clean.configure(border_color="#27AE60")
+            self.lbl_clean_title.configure(text="🧹 디지털 청소", text_color="#27AE60")
+            self.lbl_clean_content.configure(text="정리할 파일 없음\n(Downloads/Temp)")
+        else:
+            self.card_clean.configure(border_color="#D35400")
+            self.lbl_clean_title.configure(text="🧹 디지털 청소", text_color="#D35400")
+            self.lbl_clean_content.configure(text=f"정리 가능: {total}\n(Downloads {d} / Temp {t})")
+    
 # --- 나머지 프레임들은 동일 ---
 
 # --- [수정됨] 삭제 로직을 비워둔 ScanFrame ---
@@ -622,17 +710,507 @@ class WipeFrame(ctk.CTkFrame):
 
 
 class CleanFrame(ctk.CTkFrame):
-    def __init__(self, master, f_title, f_body):
-        super().__init__(master, corner_radius=0, fg_color="transparent")
-        ctk.CTkLabel(self, text="🧹 디지털 찌꺼기 청소", font=f_title).pack(pady=20, padx=20, anchor="w")
-        ctk.CTkLabel(self, text="총 2.5GB의 불필요한 파일 정리 가능", font=f_body, text_color="#F39C12").pack(pady=10)
-        self.list_frame = ctk.CTkScrollableFrame(self)
-        self.list_frame.pack(fill="both", expand=True, padx=20, pady=10)
-        for i in range(10):
-            chk = ctk.CTkCheckBox(self.list_frame, text=f"오래된_과제파일_{i}.pdf", font=f_body)
-            chk.pack(anchor="w", pady=5, padx=10)
-            chk.select()
-        ctk.CTkButton(self, text="정리하기", height=45, font=f_body, fg_color="#27AE60").pack(fill="x", padx=40, pady=20)
+    def __init__(self, master, f_title, f_body, **kwargs):
+        super().__init__(master, corner_radius=0, fg_color="transparent", **kwargs)
+        self.app = master
+        self.f_body = f_body
+
+       # [1] 에러 방지: 변수 선언을 UI 배치보다 반드시 먼저 해야 합니다!
+        self.var_days = ctk.StringVar(value="30")
+        self.var_ignore_tiny = ctk.BooleanVar(value=True)
+        self.var_include_temp = ctk.BooleanVar(value=True)
+        self.show_safe_only = False
+
+        # [2] 상태 및 제어 변수 초기화
+        self._all_files: list[DormantFile] = []
+        self._selected: dict[str, bool] = {}
+        self._seen_paths: set[str] = set()
+        self._page = 1
+        self._page_size = 30
+
+        self._scan_queue: queue.Queue | None = None
+        self._scan_running = False
+        self._scan_started = 0.0
+        self._poll_job = None
+        self._render_job = None
+        self._scanned_once = False
+
+        # [3] 레이아웃 설정
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(4, weight=1)
+
+        title_lbl = ctk.CTkLabel(self, text="🧹 디지털 찌꺼기 청소", font=f_title)
+        title_lbl.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+
+        # ===== 옵션 바 (개선된 UI) =====
+        opt = ctk.CTkFrame(self, fg_color="transparent")
+        opt.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 15))
+        
+        # 중간 여백 자동 조절 (4번 열이 늘어나면서 스캔 버튼을 오른쪽 끝으로 밀어냄)
+        opt.grid_columnconfigure(4, weight=1) 
+
+        # 1. 기준(일) - opt에 직접 배치
+        ctk.CTkLabel(opt, text="기준(일):", font=f_body).grid(row=0, column=0, padx=(0, 5))
+        self.entry_days = ctk.CTkEntry(opt, width=50, height=32, textvariable=self.var_days, font=f_body)
+        self.entry_days.grid(row=0, column=1, padx=(0, 15))
+
+        # 2. 체크박스들 - opt에 직접 배치
+        self.chk_ignore = ctk.CTkCheckBox(opt, text="1KB 미만 무시", variable=self.var_ignore_tiny, 
+                                          font=f_body, checkbox_width=18, checkbox_height=18)
+        self.chk_ignore.grid(row=0, column=2, padx=(0, 12))
+
+        self.chk_temp = ctk.CTkCheckBox(opt, text="TEMP 포함", variable=self.var_include_temp, 
+                                        font=f_body, checkbox_width=18, checkbox_height=18)
+        self.chk_temp.grid(row=0, column=3, padx=(0, 15))
+
+        # 3. 안전 필터 버튼 (텍스트 깨짐 방지 위해 width 넉넉히 설정)
+        self.filter_btn = ctk.CTkButton(
+            opt, text="안전필터: OFF", command=self.toggle_filter,
+            fg_color="#34495E", hover_color="#2C3E50",
+            width=150, height=32, font=f_body
+        )
+        self.filter_btn.grid(row=0, column=4, sticky="w") # 왼쪽 정렬
+
+        # 4. 오른쪽 스캔하기 버튼 (강조)
+        self.btn_refresh = ctk.CTkButton(
+            opt, text="스캔하기", 
+            font=ctk.CTkFont(family="Malgun Gothic", size=14, weight="bold"),
+            fg_color="#3498DB", hover_color="#2980B9",
+            command=self.refresh_scan, 
+            width=110, height=32
+        )
+        self.btn_refresh.grid(row=0, column=5, sticky="e")
+
+        # ===== 진행상황 UI =====
+        self.scan_ui = ctk.CTkFrame(self, corner_radius=10)
+        self.scan_stage = ctk.CTkLabel(self.scan_ui, text="대기 중", font=f_body)
+        self.scan_stage.pack(anchor="w", padx=12, pady=(10, 2))
+
+        self.scan_stats = ctk.CTkLabel(self.scan_ui, text="스캔: 0 | 발견: 0 | 0 B | 0 files/s",
+                                       font=f_body, text_color="#95A5A6")
+        self.scan_stats.pack(anchor="w", padx=12, pady=(0, 8))
+
+        self.scan_bar = ctk.CTkProgressBar(self.scan_ui, mode="indeterminate")
+        self.scan_bar.pack(fill="x", padx=12, pady=(0, 8))
+
+        self.scan_log = ctk.CTkTextbox(self.scan_ui, height=90, font=f_body)
+        self.scan_log.configure(state="disabled")
+        self.scan_log.pack(fill="x", padx=12, pady=(0, 12))
+
+        self.scan_ui.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 10))
+        self.scan_ui.grid_remove()
+
+        # 요약 라벨
+        self.lbl_summary = ctk.CTkLabel(self, text="스캔 대기 중", font=f_body, text_color="#F39C12")
+        self.lbl_summary.grid(row=3, column=0, sticky="w", padx=20, pady=(0, 10))
+
+        # 목록(페이지네이션: 현재 페이지만 렌더)
+        self.list_frame = ctk.CTkScrollableFrame(self, label_text="정리 대상 파일", label_font=f_body, height=330)
+        self.list_frame.grid(row=4, column=0, sticky="nsew", padx=20, pady=(0, 10))
+
+        # 페이지 네비게이션
+        nav = ctk.CTkFrame(self, fg_color="transparent")
+        nav.grid(row=5, column=0, sticky="ew", padx=20, pady=(0, 10))
+
+        self.btn_prev = ctk.CTkButton(nav, text="◀ 이전", width=120, command=self.prev_page)
+        self.btn_prev.pack(side="left")
+
+        self.lbl_page = ctk.CTkLabel(nav, text="Page 1/1", font=f_body)
+        self.lbl_page.pack(side="left", padx=12)
+
+        self.btn_next = ctk.CTkButton(nav, text="다음 ▶", width=120, command=self.next_page)
+        self.btn_next.pack(side="left")
+
+        # 하단 버튼
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.grid(row=6, column=0, sticky="ew", padx=20, pady=(0, 20))
+
+        self.btn_select_all = ctk.CTkButton(bottom, text="전체 선택", font=f_body, width=120, command=self.select_all)
+        self.btn_select_all.pack(side="left")
+
+        self.btn_clear = ctk.CTkButton(bottom, text="선택 해제", font=f_body, width=120, fg_color="#777777",
+                                       command=self.clear_selection)
+        self.btn_clear.pack(side="left", padx=10)
+
+        self.btn_clean = ctk.CTkButton(bottom, text="선택 삭제", height=45, font=f_body, fg_color="#27AE60",
+                                       command=self.clean_selected)
+        self.btn_clean.pack(side="right")
+
+        self.btn_clean_all = ctk.CTkButton(bottom, text="전체 삭제", height=45, font=f_body, fg_color="#C0392B",
+                                           command=self.clean_all)
+        self.btn_clean_all.pack(side="right", padx=10)
+
+        self._render_empty("스캔 결과가 여기에 표시됩니다.")
+
+    # ---------- UI helpers ----------
+    def _log(self, msg: str):
+        self.scan_log.configure(state="normal")
+        self.scan_log.insert("end", msg + "\n")
+        self.scan_log.see("end")
+        self.scan_log.configure(state="disabled")
+
+    def _set_controls_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        for w in [self.btn_refresh, self.entry_days, self.chk_ignore, self.chk_temp, self.filter_btn,
+                  self.btn_select_all, self.btn_clear, self.btn_clean, self.btn_clean_all,
+                  self.btn_prev, self.btn_next]:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+
+    def _render_empty(self, msg: str):
+        for w in self.list_frame.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(self.list_frame, text=msg, font=self.f_body).pack(pady=20)
+
+    # ---------- public ----------
+    def ensure_scanned(self):
+        if not self._scanned_once:
+            self._scanned_once = True
+            self.refresh_scan()
+
+    def toggle_filter(self):
+        self.show_safe_only = not self.show_safe_only
+        # 짧은 문구 사용으로 버튼 깨짐 방지
+        status = "ON" if self.show_safe_only else "OFF"
+        self.filter_btn.configure(text=f"안전필터: {status}")
+        
+        # 상태에 따른 색상 변경
+        self.filter_btn.configure(fg_color="#27AE60" if self.show_safe_only else "#34495E")
+        
+        self._page = 1
+        self._render_page()
+    # ---------- scan ----------
+    def _parse_days(self) -> int:
+        try:
+            d = int(self.var_days.get().strip())
+            return max(1, min(d, 3650))
+        except Exception:
+            return 30
+
+    def refresh_scan(self):
+        if self._scan_running:
+            return
+        days = self._parse_days()
+        ignore_tiny = bool(self.var_ignore_tiny.get())
+        include_temp = bool(self.var_include_temp.get())
+
+        # 스캔 시작
+        self.lbl_summary.configure(text="스캔 준비 중...")
+        self.app.run_cleaner_check(days=days, ignore_tiny=ignore_tiny, include_temp=include_temp)
+
+    def begin_scan(self, q, days=30, ignore_tiny=True, include_temp=True):
+        """App에서 스캔 스레드를 시작한 직후, UI가 큐 폴링을 시작하도록 호출."""
+        # 초기화
+        self._scan_queue = q
+        self._scan_running = True
+        self._scan_started = time.time()
+        self._all_files.clear()
+        self._selected.clear()
+        self._seen_paths.clear()
+        self._page = 1
+
+        # UI
+        self.lbl_summary.configure(text="스캔 진행 중...")
+        self.scan_stage.configure(text="스캔 시작")
+        self.scan_stats.configure(text="스캔: 0 | 발견: 0 | 0 B | 0 files/s")
+        self.scan_ui.grid()
+        self.scan_bar.start()
+
+        # 로그
+        self.scan_log.configure(state="normal")
+        self.scan_log.delete("1.0", "end")
+        self.scan_log.configure(state="disabled")
+        self._log(f"옵션: days={days}, ignore_tiny={ignore_tiny}, include_temp={include_temp}")
+
+        self._set_controls_enabled(False)
+        self._poll_queue()
+
+    def _poll_queue(self):
+        # ✅ 큐가 None이거나 스캔이 끝난 상태면 안전하게 종료
+        if not self._scan_running or self._scan_queue is None:
+            return
+
+        q = self._scan_queue
+        if q is None:
+            self._scan_running = False
+            self._poll_job = None
+            return
+
+        # UI 렉 방지: 한 번에 너무 많이 처리하지 않음
+        for _ in range(60):
+            try:
+                ev = q.get_nowait()
+            except queue.Empty:
+                break
+            except Exception:
+                break
+            self._handle_event(ev)
+
+        if self._scan_running and self._scan_queue is not None:
+            self._poll_job = self.after(30, self._poll_queue)
+        else:
+            self._poll_job = None
+
+    def _handle_event(self, ev: dict):
+        t = ev.get("type")
+
+        if t == "stage":
+            msg = ev.get("message") or ev.get("text") or ""
+            if msg:
+                self.scan_stage.configure(text=msg)
+                self._log(msg)
+
+        elif t == "stats":
+            scanned = int(ev.get("scanned", 0))
+            found = int(ev.get("found", 0))
+            total_bytes = int(ev.get("total_bytes", ev.get("size", 0)))
+            elapsed = float(ev.get("elapsed", max(time.time() - self._scan_started, 0.001)))
+
+            speed = scanned / max(elapsed, 0.001)
+            self.scan_stats.configure(
+                text=f"스캔: {scanned:,} | 발견: {found:,} | {human_size(total_bytes)} | {speed:,.1f} files/s"
+            )
+
+        elif t == "batch":
+            files = ev.get("files", []) or []
+            if files:
+                # 중복 제거는 set으로 누적 관리 (O(1))
+                for df in files:
+                    path_str = str(df.path)
+                    if path_str in self._seen_paths:
+                        continue
+                    self._seen_paths.add(path_str)
+
+                    self._all_files.append(df)
+
+                    # 기본적으로 새로 발견된 파일은 선택 상태로 둠
+                    if path_str not in self._selected:
+                        self._selected[path_str] = True
+
+                self._schedule_render()
+
+        elif t == "done":
+            # 1. 데이터 정리
+            files = ev.get("files")
+            if files is not None:
+                uniq = []
+                seen = set()
+                for df in files:
+                    k = str(df.path)
+                    if k not in seen:
+                        seen.add(k)
+                        uniq.append(df)
+                self._all_files = uniq
+
+                for df in self._all_files:
+                    k = str(df.path)
+                    if k not in self._selected:
+                        self._selected[k] = True
+
+            # 2. 요약 표시
+            summary = ev.get("summary") or summarize(self._all_files)
+            count = summary.get("count", len(self._all_files))
+            total = summary.get("total_human", human_size(sum(f.size_bytes for f in self._all_files)))
+            self.lbl_summary.configure(text=f"정리 가능한 파일: {count}개 / {total}")
+
+            # 3. UI 상태 복구
+            self.scan_stage.configure(text="완료 ✅")
+            self.scan_bar.stop()
+            self.scan_ui.grid_remove()
+
+            self._scan_running = False
+            self._scan_queue = None
+
+            # 🌟 [중요] 버튼들 다시 활성화 🌟
+            self._set_controls_enabled(True)
+
+            self._page = 1
+            self._render_page()
+
+        elif t == "error":
+            msg = ev.get("message") or ev.get("text") or "오류"
+            self.scan_stage.configure(text="오류 발생 ❌")
+            self.scan_bar.stop()
+            self._log(f"[ERROR] {msg}")
+            self._scan_running = False
+            self._scan_queue = None
+            messagebox.showerror("스캔 오류", msg)
+
+    def _is_safe(self, df: DormantFile) -> bool:
+        try:
+            # Cleaner.py의 함수가 정상적으로 import 되었는지 확인 필수
+            level, _ = classify_delete_safety(df)
+            return level == "SAFE"
+        except NameError:
+            # 함수가 없으면 보수적으로 모두 '확인 필요'로 표시
+            return False
+        except Exception:
+            return False
+
+    def _filtered_files(self) -> list[DormantFile]:
+        if not self.show_safe_only:
+            return list(self._all_files)
+        return [df for df in self._all_files if self._is_safe(df)]
+
+    def prev_page(self):
+        if self._page > 1:
+            self._page -= 1
+            self._render_page()
+
+    def next_page(self):
+        total_pages = max(1, math.ceil(len(self._filtered_files()) / self._page_size))
+        if self._page < total_pages:
+            self._page += 1
+            self._render_page()
+
+    def _render_page(self):
+        self._render_job = None
+
+        # 1. 필터링된 데이터 준비
+        files = self._filtered_files()
+        total = len(files)
+        total_pages = max(1, math.ceil(total / self._page_size))
+        self._page = max(1, min(self._page, total_pages))
+
+        # 2. 페이지 라벨 업데이트 
+        self.lbl_page.configure(text=f"Page {self._page}/{total_pages}")
+
+        # [핵심 최적화] 3. 스캔 중이고, 이미 1페이지 분량의 데이터가 화면에 있다면 
+        # 굳이 전체를 다시 그리지 않고 통계 수치만 업데이트하도록 리턴합니다.
+        current_widgets = self.list_frame.winfo_children()
+        if self._scan_running and len(current_widgets) >= self._page_size:
+            # 1페이지가 꽉 찼다면, 스캔이 끝날 때까지 리스트 갱신을 멈춰서 렉을 방지합니다.
+            return
+
+        # 4. 화면 청소
+        for w in current_widgets:
+            w.destroy()
+
+        # 5. 빈 화면 처리
+        if total == 0:
+            if self._scan_running:
+                self._render_empty("스캔 중... (파일이 발견되면 여기에 표시됩니다)")
+            else:
+                self._render_empty("표시할 파일이 없습니다.")
+            return
+
+        # 6. 실제 항목 생성 (현재 페이지만)
+        start = (self._page - 1) * self._page_size
+        end = start + self._page_size
+        for df in files[start:end]:
+            self._create_file_row(df)
+            
+        # 7. UI 즉시 반영 강제 (렉 완화 도움)
+        self.update_idletasks()
+    
+    def _schedule_render(self):
+        """매번 화면을 그리지 않고 0.1초 뒤에 한 번만 그리도록 예약 (성능 최적화)"""
+        if self._render_job:
+            self.after_cancel(self._render_job)
+        self._render_job = self.after(100, self._render_page)
+
+    def _create_file_row(self, df: DormantFile):
+        # 한 줄 UI: [체크박스] [파일 정보(2줄)] [오른쪽 상태 배지]
+        row = ctk.CTkFrame(self.list_frame, corner_radius=10)
+        row.pack(fill="x", padx=8, pady=6)
+
+        # 3열: 체크 / 텍스트(가변) / 배지(고정)
+        row.grid_columnconfigure(1, weight=1)
+        row.grid_columnconfigure(2, minsize=130)
+
+        path_key = str(df.path)
+        v = ctk.BooleanVar(value=self._selected.get(path_key, True))
+
+        def _on_toggle(*_):
+            self._selected[path_key] = bool(v.get())
+
+        v.trace_add("write", _on_toggle)
+
+        chk = ctk.CTkCheckBox(row, text="", variable=v, width=32)
+        chk.grid(row=0, column=0, padx=(10, 8), pady=10, sticky="w")
+
+        # 오른쪽 배지(고정 폭)
+        is_safe = self._is_safe(df)
+        tag_text = "✅ 안전" if is_safe else "⚠ 확인"
+        tag_color = "#2ECC71" if is_safe else "#F1C40F"
+
+        # 텍스트가 오른쪽을 침범하지 않도록 wraplength를 동적으로 계산
+        w = self.list_frame.winfo_width()
+        if w < 200:
+            w = 760  # 초기 렌더 시 대비(고정 창 기준)
+        wrap = max(260, w - 32 - 10 - 130 - 60)
+
+        info = f"[{df.root}] {df.path.name}  •  {human_size(df.size_bytes)}  •  {df.last_modified:%Y-%m-%d}\n{df.path}"
+        lbl = ctk.CTkLabel(row, text=info, font=self.f_body, anchor="w", justify="left", wraplength=wrap)
+        lbl.grid(row=0, column=1, padx=(0, 8), pady=10, sticky="w")
+
+        tag_frame = ctk.CTkFrame(row, fg_color="transparent", width=130)
+        tag_frame.grid(row=0, column=2, padx=(0, 10), pady=10, sticky="e")
+        tag_frame.grid_propagate(False)
+
+        tag_lbl = ctk.CTkLabel(tag_frame, text=tag_text, text_color=tag_color, width=120, anchor="center", font=self.f_body)
+        tag_lbl.pack(fill="both", expand=True)
+    def select_all(self):
+        for df in self._filtered_files():
+            self._selected[str(df.path)] = True
+        self._render_page()
+
+    def clear_selection(self):
+        for df in self._filtered_files():
+            self._selected[str(df.path)] = False
+        self._render_page()
+
+    def _selected_files(self) -> list[DormantFile]:
+        selected_paths = {p for p, ok in self._selected.items() if ok}
+        return [df for df in self._all_files if str(df.path) in selected_paths]
+
+    def clean_selected(self):
+        selected = self._selected_files()
+        if not selected:
+            messagebox.showinfo("안내", "삭제할 파일이 선택되지 않았습니다.")
+            return
+
+        total = sum(f.size_bytes for f in selected)
+        ok = messagebox.askyesno(
+            "삭제 확인",
+            f"선택한 {len(selected)}개 파일을 '일반 삭제'합니다.\n총 크기: {human_size(total)}\n\n계속할까요?"
+        )
+        if not ok:
+            return
+
+        deleted, failed = delete_files(selected)
+
+        msg = f"삭제 완료: {len(deleted)}개"
+        if failed:
+            msg += f"\n실패: {len(failed)}개 (권한/사용중 등)"
+        messagebox.showinfo("결과", msg)
+
+        self.refresh_scan()
+
+    def clean_all(self):
+        files = self._filtered_files()
+        if not files:
+            messagebox.showinfo("안내", "삭제할 파일이 없습니다.")
+            return
+
+        total = sum(f.size_bytes for f in files)
+        ok = messagebox.askyesno(
+            "전체 삭제 확인",
+            f"현재 표시 중인 파일 {len(files)}개를 '일반 삭제'합니다.\n총 크기: {human_size(total)}\n\n계속할까요?"
+        )
+        if not ok:
+            return
+
+        deleted, failed = delete_files(files)
+
+        msg = f"삭제 완료: {len(deleted)}개"
+        if failed:
+            msg += f"\n실패: {len(failed)}개 (권한/사용중 등)"
+        messagebox.showinfo("결과", msg)
+
+        self.refresh_scan()
 
 class StartupFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):
