@@ -579,7 +579,7 @@ class WipeFrame(ctk.CTkFrame):
 
         self.wiper = SecureWiper(chunk_size=1024 * 1024)  # 1MB
         self.is_wiping = False
-        self.selected_path = None
+        self.selected_paths: list[str] = []
 
         ctk.CTkLabel(self, text="🔒 완전 보안 삭제 (디지털 세탁소)", font=f_title).pack(pady=20, padx=20, anchor="w")
 
@@ -663,38 +663,41 @@ class WipeFrame(ctk.CTkFrame):
                 self.lbl_drop.configure(text="(드래그앤드롭 비활성)\n아래 버튼으로 파일을 선택하세요")
     
     def on_drop_files(self, files: list[str]):
-        # files가 비었으면 그냥 종료(방어)
         if not files:
             return
 
-        first = files[0]
-
-        # 폴더/파일 모두 들어올 수 있음. 일단은 파일만 받는 구조로 처리
         from pathlib import Path
-        p = Path(first)
 
-        if p.is_dir():
-            self.lbl_status.configure(text="폴더가 드롭됐어요. 현재는 파일만 지원합니다.")
-            return
-
-        if not p.exists():
+        # 존재하는 것만 필터링
+        valid = []
+        for x in files:
+            p = Path(x)
+            if p.exists():
+                valid.append(str(p))
+        
+        if not valid:
             self.lbl_status.configure(text="드롭된 경로를 찾을 수 없어요.")
             return
 
-        self.set_selected_file(str(p))
+        # 여러 개(파일/폴더) 선택 상태로 세팅
+        self.set_selected_paths(valid)
 
-    def set_selected_file(self, path: str):
-        self.selected_path = path
+
+    def set_selected_paths(self, paths: list[str]):
+        self.selected_paths = paths
 
         self.entry_path.configure(state="normal")
         self.entry_path.delete(0, "end")
-        self.entry_path.insert(0, path)
+
+        if len(paths) == 1:
+            self.entry_path.insert(0, paths[0])
+            self.lbl_status.configure(text="선택됨")
+        else:
+            self.entry_path.insert(0, f"{len(paths)}개 선택됨")
+            self.lbl_status.configure(text=f"{len(paths)}개 선택됨")
+
         self.entry_path.configure(state="disabled")
-
-        self.lbl_status.configure(text="파일 선택됨 (드롭)")
         self.progress.set(0)
-
-
 
 
     # ---------- UI Helpers ----------
@@ -709,7 +712,7 @@ class WipeFrame(ctk.CTkFrame):
         if self.is_wiping:
             messagebox.showinfo("알림", "삭제 진행 중에는 변경할 수 없습니다.")
             return
-        self.selected_path = None
+        self.selected_paths = []
         self.entry_path.configure(state="normal")
         self.entry_path.delete(0, "end")
         self.entry_path.configure(state="disabled")
@@ -718,37 +721,39 @@ class WipeFrame(ctk.CTkFrame):
 
     def pick_file(self):
         if self.is_wiping:
-            messagebox.showinfo("알림", "삭제 진행 중에는 변경할 수 없습니다.")
             return
-        path = filedialog.askopenfilename()
-        if path:
-            self.set_path(path)
+
+        paths = filedialog.askopenfilenames()
+        if paths:
+            self.set_selected_paths(list(paths))
+
 
     # ---------- Workflow ----------
     def confirm_and_start(self):
         if self.is_wiping:
             return
 
-        path = (self.selected_path or "").strip()
-        if not path:
-            messagebox.showwarning("안내", "먼저 삭제할 파일을 선택하세요.")
+        paths = [p for p in (self.selected_paths or []) if p and str(p).strip()]
+        if not paths:
+            messagebox.showwarning("안내", "먼저 삭제할 파일/폴더를 선택하세요.")
             return
 
-        if not os.path.isfile(path):
-            messagebox.showwarning("안내", "일반 파일만 삭제할 수 있습니다.")
+        # 존재 검사
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            messagebox.showwarning("안내", f"존재하지 않는 경로가 포함되어 있습니다.\n\n{missing[0]}")
             return
 
-        # 확인 팝업
         ok = messagebox.askyesno(
             "정말 영구 삭제할까요?",
             "⚠️ 이 작업은 되돌릴 수 없습니다.\n\n"
-            "3-pass(0→1→난수) 덮어쓰기 후 파일을 삭제합니다.\n"
+            f"선택 항목: {len(paths)}개\n"
+            "3-pass(0→1→난수) 덮어쓰기 후 삭제합니다.\n"
             "진행하시겠습니까?"
         )
         if not ok:
             return
 
-        # 시작
         self.is_wiping = True
         self.btn_run.configure(state="disabled")
         self.btn_select.configure(state="disabled")
@@ -756,24 +761,34 @@ class WipeFrame(ctk.CTkFrame):
         self.progress.set(0)
         self.lbl_status.configure(text="삭제 준비 중...")
 
-        threading.Thread(target=self._wipe_thread, args=(path,), daemon=True).start()
+        threading.Thread(target=self._wipe_thread, args=(paths,), daemon=True).start()
 
-    def _wipe_thread(self, path: str):
-        # stage -> 화면 표시용
+
+    def _wipe_thread(self, paths: list[str]):
         stage_map = {
             "PASS1_ZERO": "PASS 1/3: 0으로 덮는 중",
             "PASS2_ONE": "PASS 2/3: 1로 덮는 중",
             "PASS3_RANDOM": "PASS 3/3: 난수로 덮는 중",
         }
 
-        def progress_cb(written, total, stage):
-            pct = 0 if total == 0 else (written / total)
-            text = stage_map.get(stage, stage)
-            self.after(0, lambda: self._update_progress(pct, text))
+        total_items = len(paths)
 
-        status, detail = self.wiper.wipe_file(path, progress_cb=progress_cb)
+        for idx, path in enumerate(paths, start=1):
+            def progress_cb(written, total, stage):
+                pct = 0 if total == 0 else (written / total)
+                text = stage_map.get(stage, stage)
+                self.after(0, lambda p=pct, t=text, i=idx:
+                        self._update_progress(p, f"[{i}/{total_items}] {t}"))
 
-        self.after(0, lambda: self._finish(status, detail))
+            # ✅ 여기서부터는 secure_wiper.py에 wipe_path / wipe_folder를 추가한 경우
+            status, detail = self.wiper.wipe_path(path, progress_cb=progress_cb)  # (권장)
+            # 만약 아직 wipe_path를 안 만들었으면: 파일이면 wipe_file, 폴더면 wipe_folder로 분기해야 함
+
+            if status != "SUCCESS":
+                self.after(0, lambda s=status, d=detail: self._finish(s, d))
+                return
+
+        self.after(0, lambda: self._finish("SUCCESS", "모두 삭제 완료"))
 
     def _update_progress(self, pct: float, text: str):
         self.progress.set(max(0.0, min(1.0, pct)))
@@ -936,16 +951,13 @@ class CleanFrame(ctk.CTkFrame):
         self.btn_select_all = ctk.CTkButton(bottom, text="전체 선택", font=f_body, width=120, command=self.select_all)
         self.btn_select_all.pack(side="left")
 
-        self.btn_clear = ctk.CTkButton(bottom, text="선택 해제", font=f_body, width=120, fg_color="#777777",
-                                       command=self.clear_selection)
+        self.btn_clear = ctk.CTkButton(bottom, text="선택 해제", font=f_body, width=120, fg_color="#777777",command=self.clear_selection)
         self.btn_clear.pack(side="left", padx=10)
 
-        self.btn_clean = ctk.CTkButton(bottom, text="선택 삭제", height=45, font=f_body, fg_color="#27AE60",
-                                       command=self.clean_selected)
+        self.btn_clean = ctk.CTkButton(bottom, text="선택 삭제", height=45, font=f_body, fg_color="#27AE60",command=self.clean_selected)
         self.btn_clean.pack(side="right")
 
-        self.btn_clean_all = ctk.CTkButton(bottom, text="전체 삭제", height=45, font=f_body, fg_color="#C0392B",
-                                           command=self.clean_all)
+        self.btn_clean_all = ctk.CTkButton(bottom, text="전체 삭제", height=45, font=f_body, fg_color="#C0392B",command=self.clean_all)
         self.btn_clean_all.pack(side="right", padx=10)
 
         self._render_empty("스캔 결과가 여기에 표시됩니다.")

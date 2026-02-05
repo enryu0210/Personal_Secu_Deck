@@ -1,6 +1,7 @@
 # src/secure_wiper.py
 import os
 import secrets
+import stat
 
 class SecureWiper:
     """
@@ -117,3 +118,76 @@ class SecureWiper:
             os.fsync(f.fileno())
         except Exception:
             pass
+
+    def _force_rmdir(self, p: str):
+        """Windows에서 read-only 폴더도 지우기 위해 chmod 후 rmdir 재시도"""
+        try:
+            os.rmdir(p)
+            return
+        except PermissionError:
+            try:
+                os.chmod(p, stat.S_IWRITE)
+            except Exception:
+                pass
+            os.rmdir(p)
+
+    def wipe_folder(self, folder_path: str, progress_cb=None):
+        try:
+            if not folder_path or not isinstance(folder_path, str):
+                return "INVALID", "경로가 올바르지 않습니다."
+
+            if not os.path.exists(folder_path):
+                return "NOT_FOUND", "폴더가 존재하지 않습니다."
+
+            if self.is_system_protected_path(folder_path):
+                return "SYSTEM_BLOCKED", "시스템 보호 파일/경로는 삭제가 거부됩니다."
+
+            if not os.path.isdir(folder_path):
+                return "INVALID", "폴더만 처리할 수 있습니다."
+
+            # 안쪽부터 처리(파일→하위폴더→루트폴더)
+            for root, dirs, files in os.walk(folder_path, topdown=False):
+                # 1) 파일 보안 삭제
+                for name in files:
+                    fp = os.path.join(root, name)
+                    status, detail = self.wipe_file(fp, progress_cb=progress_cb)
+                    if status != "SUCCESS":
+                        return status, f"파일 삭제 실패: {fp} / {detail}"
+
+                # 2) (비어있게 된) 하위 폴더 삭제
+                for name in dirs:
+                    dp = os.path.join(root, name)
+                    try:
+                        self._force_rmdir(dp)
+                    except OSError:
+                        # 혹시 숨김/시스템 파일 등이 남아있으면 여기서 실패할 수 있음
+                        return "IO_ERROR", f"폴더 삭제 실패: {dp}"
+
+            # 3) 마지막으로 루트 폴더 삭제
+            try:
+                self._force_rmdir(folder_path)
+            except OSError:
+                return "IO_ERROR", f"폴더 삭제 실패: {folder_path}"
+
+            return "SUCCESS", "폴더 삭제 완료"
+
+        except PermissionError as e:
+            return "PERMISSION", str(e)
+        except FileNotFoundError as e:
+            return "NOT_FOUND", str(e)
+        except OSError as e:
+            return "IO_ERROR", str(e)
+        except Exception as e:
+            return "UNKNOWN", repr(e)
+
+        
+    def wipe_path(self, path: str, progress_cb=None):
+        if os.path.isfile(path):
+            return self.wipe_file(path, progress_cb)
+
+        if os.path.isdir(path):
+            return self.wipe_folder(path, progress_cb)
+
+        return "INVALID", "유효한 파일 또는 폴더가 아닙니다."
+
+
