@@ -710,7 +710,7 @@ class WipeFrame(ctk.CTkFrame):
 
         # 선택된 게 있을 때
         self.lbl_drop.configure(text=f"총 {len(paths)}개 선택됨", wraplength=520)
-        self.btn_select.configure(text="🔁 다시 선택하기")
+        self.btn_select.configure(text="추가 선택")
 
         # --- 선택 목록 렌더링 ---
         for w in self.sel_list.winfo_children():
