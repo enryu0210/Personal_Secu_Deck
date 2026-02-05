@@ -115,7 +115,7 @@ class App(TkinterDnD.Tk):
         self.dashboard_frame = DashboardFrame(self.bg_layer, self.font_title, self.font_subtitle, self.font_body, app_instance=self)
         self.scan_frame = ScanFrame(self.bg_layer, self.font_title, self.font_body)
         self.wipe_frame = WipeFrame(self.bg_layer, self.font_title, self.font_body)
-        self.clean_frame = CleanFrame(self.bg_layer, self.font_title, self.font_body)
+        self.clean_frame = CleanFrame(self.bg_layer, self.font_title, self.font_body, app_instance=self)
         self.startup_frame = StartupFrame(self.bg_layer, self.font_title, self.font_body)
         self.ai_frame = AIFrame(self.bg_layer, self.font_title, self.font_body)
 
@@ -818,9 +818,9 @@ class WipeFrame(ctk.CTkFrame):
 
 
 class CleanFrame(ctk.CTkFrame):
-    def __init__(self, master, f_title, f_body, **kwargs):
+    def __init__(self, master, f_title, f_body, app_instance=None, **kwargs):
         super().__init__(master, corner_radius=0, fg_color="transparent", **kwargs)
-        self.app = master
+        self.app = app_instance
         self.f_body = f_body
 
        # [1] 에러 방지: 변수 선언을 UI 배치보다 반드시 먼저 해야 합니다!
@@ -999,6 +999,9 @@ class CleanFrame(ctk.CTkFrame):
 
     def refresh_scan(self):
         if self._scan_running:
+            return
+        if self.app is None:
+            messagebox.showerror("오류", "App 인스턴스를 찾을 수 없습니다. (clean_frame 생성부 확인)")
             return
         days = self._parse_days()
         ignore_tiny = bool(self.var_ignore_tiny.get())
