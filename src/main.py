@@ -7,6 +7,7 @@ import tempfile
 import math
 import json
 import re
+import subprocess
 from pathlib import Path
 from tkinterdnd2 import TkinterDnD
 from datetime import datetime
@@ -66,6 +67,117 @@ def bind_drop_files(widget, on_files) -> bool:
     except Exception:
         return False
 
+def get_media_type_for_path(path: str) -> str:
+    try:
+        # 1. 경로 절대경로로 변환 및 드라이브 문자 추출 (예: "C")
+        abs_path = os.path.abspath(path)
+        drive_root = os.path.splitdrive(abs_path)[0] # "C:"
+        drive_letter = drive_root.replace(":", "").upper()
+
+        if not drive_letter:
+            return "UNKNOWN"
+
+        # 2. PowerShell 명령어 (에러 발생 시 JSON 파싱 에러 방지를 위해 try-catch 내장)
+        # Get-Partition -> Get-Disk -> MediaType 확인
+        ps_command = f"""
+        try {{
+            $p = Get-Partition -DriveLetter {drive_letter} -ErrorAction Stop
+            $d = Get-Disk -Number $p.DiskNumber -ErrorAction Stop
+            $type = $d.MediaType
+            if (-not $type) {{ $type = "Unspecified" }}
+            @{{type=$type.ToString()}} | ConvertTo-Json -Compress
+        }} catch {{
+            @{{type="ERROR"}} | ConvertTo-Json -Compress
+        }}
+        """
+
+        # 3. 서브프로세스 실행 (콘솔 창 안 뜨게 설정)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        
+        output = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", ps_command],
+            text=True,
+            startupinfo=startupinfo  # 검은색 팝업창 방지
+        ).strip()
+
+        # 4. JSON 파싱 및 결과 판단
+        try:
+            data = json.loads(output)
+            media_type = data.get("type", "").upper()
+        except json.JSONDecodeError:
+            media_type = "ERROR"
+
+        # 5. 결과 매핑
+        if "SSD" in media_type:
+            return "SSD"
+        elif "HDD" in media_type:
+            return "HDD"
+        else:
+            # USB나 가상 드라이브 등 판별 불가 시
+            # C드라이브는 요즘 99% SSD이므로 SSD로 추정
+            if drive_letter == "C":
+                return "SSD"
+            # 나머지는 안전하게(강력하게) 지우기 위해 HDD로 간주
+            return "HDD" 
+
+    except Exception as e:
+        print(f"디스크 판별 오류: {e}")
+        # 에러 나면 안전하게 HDD 방식(3-pass) 적용
+        return "HDD"
+
+
+def summarize_media_types(paths: list[str]) -> dict:
+    """
+    paths를 SSD/HDD/UNKNOWN으로 분류해서 요약 반환
+    return 예:
+    {
+      "SSD": ["C:\\a.txt", ...],
+      "HDD": ["D:\\b.txt", ...],
+      "UNKNOWN": ["E:\\c.txt", ...],
+    }
+    """
+    buckets = {"SSD": [], "HDD": [], "UNKNOWN": []}
+    for p in paths:
+        mt = get_media_type_for_path(p)
+        if mt not in buckets:
+            mt = "UNKNOWN"
+        buckets[mt].append(p)
+    return buckets
+
+def build_wipe_confirm_message(paths: list[str]) -> str:
+    b = summarize_media_types(paths)
+    ssd_n = len(b["SSD"])
+    hdd_n = len(b["HDD"])
+    unk_n = len(b["UNKNOWN"])
+    total = len(paths)
+
+    lines = []
+    lines.append("⚠️ 이 작업은 되돌릴 수 없습니다.\n")
+    lines.append(f"선택 항목: {total}개\n")
+
+    # SSD/HDD 안내 문구
+    if total == 1:
+        # 단일 선택이면 더 직관적으로
+        if ssd_n == 1:
+            lines.append("• 저장장치: SSD 감지\n")
+            lines.append("• 방식: 1-pass overwrite (NIST SP 800-88) 후 삭제\n")
+        elif hdd_n == 1 or unk_n == 1:
+            # UNKNOWN은 보수적으로 HDD 방식으로 안내
+            lines.append(f"• 저장장치: {'HDD 감지' if hdd_n == 1 else '판별 불가(보수 적용)'}\n")
+            lines.append("• 방식: 3-pass overwrite (DoD 5220.22-M) 후 삭제\n")
+    else:
+        # 여러 개면 요약
+        lines.append("• 파일 위치별 적용 방식:\n")
+        if ssd_n:
+            lines.append(f"   - SSD: {ssd_n}개 → 1-pass overwrite (NIST SP 800-88)\n")
+        if hdd_n:
+            lines.append(f"   - HDD: {hdd_n}개 → 3-pass overwrite (DoD 5220.22-M)\n")
+        if unk_n:
+            lines.append(f"   - 판별 불가: {unk_n}개 → 안전을 위해 HDD 방식(3-pass) 적용\n")
+
+    lines.append("\n진행하시겠습니까?")
+    return "".join(lines)
 
 # --- 초기 설정 ---
 # ctk.set_appearance_mode("Dark")
@@ -335,11 +447,13 @@ class DashboardFrame(ctk.CTkFrame):
     
 # --- 나머지 프레임들은 동일 ---
 
-# --- [수정됨] 삭제 로직을 비워둔 ScanFrame ---
 class ScanFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):
         super().__init__(master, corner_radius=0, fg_color="transparent")
         self.scanner = SensitiveDataScanner()
+        # [New] 보안 삭제 엔진 장착 (여기서 SecureWiper를 불러옵니다)
+        self.wiper = SecureWiper() 
+
         self.is_scanning = False
         self.master_app = master 
         self.current_alert_count = 0 
@@ -365,13 +479,67 @@ class ScanFrame(ctk.CTkFrame):
         self.lbl_status = ctk.CTkLabel(self, text="준비됨", font=f_body)
         self.lbl_status.pack(pady=5)
         
-        # 프로그레스바 (일단 생성만 해둠)
+        # 프로그레스바
         self.progress = ctk.CTkProgressBar(self)
         self.progress.set(0)
 
         self.result_area = ctk.CTkScrollableFrame(self, label_text="스캔 결과", label_font=f_body)
         self.result_area.pack(fill="both", expand=True, padx=20, pady=20)
 
+    # [수정됨] 보안 삭제 요청 처리 함수 (실제 삭제 로직 연결)
+    def request_secure_delete(self, file_path, card_widget):
+        # 1. 사용자 확인 (가장 중요)
+        if not messagebox.askyesno("영구 삭제 확인", 
+            f"정말 삭제하시겠습니까?\n\n파일: {os.path.basename(file_path)}\n\n⚠️ 주의: 보안 덮어쓰기가 수행되며, 절대 복구할 수 없습니다."):
+            return
+
+        # 2. UI 멈춤 방지를 위해 스레드로 실행
+        threading.Thread(target=self._run_secure_delete, args=(file_path, card_widget), daemon=True).start()
+
+    # [New] 실제 삭제를 수행하는 내부 함수 (스레드용)
+    def _run_secure_delete(self, file_path, card_widget):
+        # 보안 삭제 엔진 가동
+        status, detail = self.wiper.wipe_file(file_path)
+        
+        # 결과 처리는 메인 UI 스레드에서 해야 안전함
+        self.after(0, lambda: self._handle_delete_result(status, detail, card_widget))
+
+    # [New] 삭제 결과에 따라 UI를 갱신하는 함수
+    def _handle_delete_result(self, status, detail, card_widget):
+        if status == "SUCCESS":
+            messagebox.showinfo("삭제 완료", "파일이 안전하게 영구 삭제되었습니다.")
+            
+            # 1. 카드 제거
+            card_widget.destroy()
+            
+            # 2. 카운트 감소 및 대시보드 갱신
+            if self.current_alert_count > 0:
+                self.current_alert_count -= 1
+            
+            self.lbl_status.configure(text=f"분석 완료! 총 {self.current_alert_count}개의 파일이 감지되었습니다.")
+            
+            try:
+                self.master_app.dashboard_frame.update_scan_ui(self.current_alert_count)
+            except: pass
+            
+            # 3. 다 지워서 목록이 비었을 때 메시지 표시
+            if self.current_alert_count == 0:
+                # 결과창이 비었으면 안내 메시지 추가
+                for widget in self.result_area.winfo_children(): widget.destroy()
+                ctk.CTkLabel(self.result_area, text="모든 항목이 처리되었습니다.").pack(pady=20)
+                
+        else:
+            # 실패 사유별 친절한 에러 메시지
+            msg_map = {
+                "IN_USE": "파일이 현재 사용 중입니다.\n관련 프로그램을 종료하고 다시 시도해주세요.",
+                "PERMISSION": "삭제 권한이 없습니다.\n관리자 권한으로 실행하거나 파일 권한을 확인하세요.",
+                "SYSTEM_BLOCKED": "시스템 보호 파일은 안전을 위해 삭제가 차단됩니다.",
+                "NOT_FOUND": "파일을 찾을 수 없습니다.\n이미 삭제되었거나 이동되었을 수 있습니다."
+            }
+            err_msg = msg_map.get(status, f"오류 발생: {detail}")
+            messagebox.showerror("삭제 실패", err_msg)
+
+    # --- 이하 기존 코드 유지 ---
     def reset_ui(self):
         self.is_scanning = False
         self.cached_results = []
@@ -380,7 +548,6 @@ class ScanFrame(ctk.CTkFrame):
         self.btn_start.configure(state="normal", text="스캔 시작")
         self.lbl_status.configure(text="준비됨")
         
-        # 리셋 시 프로그레스바 숨기기
         self.progress.set(0)
         self.progress.pack_forget()
         
@@ -394,10 +561,9 @@ class ScanFrame(ctk.CTkFrame):
         self.is_scanning = True
         self.btn_start.configure(state="disabled", text="스캔 중...")
         
-        # [수정됨] before 옵션 에러 해결법: "뺐다가 다시 넣기"
-        self.result_area.pack_forget()             # 1. 결과창을 잠시 숨김
-        self.progress.pack(fill="x", padx=40, pady=5) # 2. 프로그레스바를 넣음 (이러면 맨 아래에 붙음)
-        self.result_area.pack(fill="both", expand=True, padx=20, pady=20) # 3. 결과창을 다시 넣음 (바 아래에 붙음)
+        self.result_area.pack_forget()
+        self.progress.pack(fill="x", padx=40, pady=5)
+        self.result_area.pack(fill="both", expand=True, padx=20, pady=20)
         
         for widget in self.result_area.winfo_children(): widget.destroy()
         threading.Thread(target=self.run_scan, daemon=True).start()
@@ -411,7 +577,6 @@ class ScanFrame(ctk.CTkFrame):
             results = self.scanner.start_scan(update_progress)
             self.after(0, lambda: self.show_results(results))
         except Exception as e:
-            # 에러 발생 시 처리
             print(f"스캔 오류: {e}")
             self.after(0, lambda: self.handle_scan_error(e))
 
@@ -419,7 +584,6 @@ class ScanFrame(ctk.CTkFrame):
         self.reset_ui() 
         messagebox.showerror("스캔 오류", f"스캔 도중 문제가 발생하여 중단되었습니다.\n\n[에러 내용]\n{error_msg}")
 
-    # --- 아래는 기존과 동일 ---
     def load_ignore_list(self):
         if not os.path.exists(self.ignore_file): return []
         try:
@@ -435,9 +599,6 @@ class ScanFrame(ctk.CTkFrame):
     def refresh_view(self):
         if self.cached_results:
             self.show_results(self.cached_results)
-
-    def request_secure_delete(self, file_path, card_widget):
-        messagebox.showinfo("알림", "보안 삭제 모듈 연동 예정")
 
     def dismiss_card_permanently(self, file_path, card_widget):
         if not messagebox.askyesno("검사 예외 처리", f"이 파일을 무시하시겠습니까?\n(체크박스를 켜야 다시 볼 수 있습니다)"):
@@ -459,7 +620,6 @@ class ScanFrame(ctk.CTkFrame):
         self.cached_results = results 
         self.btn_start.configure(state="normal", text="다시 스캔하기")
         
-        # 완료되면 프로그레스바 숨기기
         self.progress.pack_forget()
 
         filtered_results = []
@@ -557,6 +717,7 @@ class ScanFrame(ctk.CTkFrame):
                                        command=toggle_details)
             btn_toggle.pack(side="right", padx=2)
 
+            # [수정됨] 삭제 버튼 클릭 시 새로 만든 request_secure_delete 호출
             ctk.CTkButton(btn_frame, text="삭제", width=50, height=30, fg_color="#C0392B", hover_color="#922B21",
                           command=lambda p=file_path, c=card: self.request_secure_delete(p, c)).pack(side="right", padx=2)
             
@@ -579,7 +740,7 @@ class WipeFrame(ctk.CTkFrame):
 
         self.wiper = SecureWiper(chunk_size=1024 * 1024)  # 1MB
         self.is_wiping = False
-        self.selected_path = None
+        self.selected_paths: list[str] = []
 
         ctk.CTkLabel(self, text="🔒 완전 보안 삭제 (디지털 세탁소)", font=f_title).pack(pady=20, padx=20, anchor="w")
 
@@ -609,18 +770,33 @@ class WipeFrame(ctk.CTkFrame):
         self.drop_zone.pack(fill="x", padx=20, pady=10)
         self.drop_zone.pack_propagate(False)
 
-        self.lbl_drop = ctk.CTkLabel(self.drop_zone, text="이곳에 파일을 드래그(옵션)하거나\n아래 버튼으로 파일을 선택하세요",
-                                     font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold"))
-        self.lbl_drop.place(relx=0.5, rely=0.35, anchor="center")
+        # 드롭존 내부 컨텐츠 프레임(가운데 정렬용)
+        self.drop_content = ctk.CTkFrame(self.drop_zone, fg_color="transparent")
+        self.drop_content.pack(fill="x", expand=True, padx=30, pady=10)
+
+
+        self.lbl_drop = ctk.CTkLabel(
+            self.drop_content,
+            text="이곳에 파일을 드래그(옵션)하거나\n아래 버튼으로 파일을 선택하세요",
+            font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold"),
+            justify="center",
+            wraplength=520
+        )
+        self.lbl_drop.pack(pady=(16, 12), padx=10)
+
+        self.sel_list = ctk.CTkScrollableFrame(self.drop_content, height=90, fg_color="transparent")
+        self.sel_list.pack(fill="x", padx=10, pady=(0, 10))
+        self.sel_list.pack_forget()  # 처음엔 숨김
 
         self.btn_select = ctk.CTkButton(
-            self.drop_zone,
+            self.drop_content,
             text="📁 파일 선택하기",
             font=f_body,
             height=42,
             command=self.pick_file
         )
-        self.btn_select.place(relx=0.5, rely=0.62, anchor="center")
+        self.btn_select.pack(pady=(0, 20))
+
 
         # 선택된 파일 표시
         path_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -631,8 +807,7 @@ class WipeFrame(ctk.CTkFrame):
         self.entry_path.pack(side="left", fill="x", expand=True, padx=(10, 10))
         self.entry_path.configure(state="disabled")
 
-        self.btn_clear = ctk.CTkButton(path_row, text="지우기", width=90, fg_color="#555555",
-                                       font=f_body, command=self.clear_file)
+        self.btn_clear = ctk.CTkButton(path_row, text="지우기", width=90, fg_color="#555555", font=f_body, command=self.clear_file)
         self.btn_clear.pack(side="right")
 
         # 진행 상태
@@ -661,40 +836,152 @@ class WipeFrame(ctk.CTkFrame):
         if not (ok1 or ok2):
                 # 루트가 TkinterDnD 기반이 아니면 DnD 메서드가 없어서 여기로 빠질 수 있음
                 self.lbl_drop.configure(text="(드래그앤드롭 비활성)\n아래 버튼으로 파일을 선택하세요")
+        # ⭐ 초기 드롭존 상태 세팅
+        self.update_drop_zone_view()
+
+    
+    def update_drop_zone_view(self):
+        paths = self.selected_paths or []
+
+        # 1️⃣ 아무것도 선택 안 됐을 때 (초기 화면)
+        if not paths:
+            self.lbl_drop.configure(
+                text="이곳에 파일을 드래그(옵션)하거나\n아래 버튼으로 파일을 선택하세요"
+            )
+            self.btn_select.configure(text="📁 파일 선택하기")
+
+            # ⭐ 추가: 목록 UI 정리(잔상 제거)
+            for w in self.sel_list.winfo_children():
+                w.destroy()
+            self.sel_list.pack_forget()
+
+            return
+
+        # ---- 아래는 그대로 ----
+        lines = []
+        for p in paths[:5]:
+            icon = "📁" if Path(p).is_dir() else "📄"
+            lines.append(f"{icon} {p}")
+
+        if len(paths) > 5:
+            lines.append(f"... 외 {len(paths) - 5}개")
+
+        # 선택된 게 있을 때
+        self.lbl_drop.configure(text=f"총 {len(paths)}개 선택됨", wraplength=520)
+        self.btn_select.configure(text="추가 선택")
+
+        # --- 선택 목록 렌더링 ---
+        for w in self.sel_list.winfo_children():
+            w.destroy()
+
+        self.sel_list.pack(fill="x", padx=10, pady=(0, 10))
+
+        for p in paths:
+            row = ctk.CTkFrame(self.sel_list, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+
+            icon = "📁" if Path(p).is_dir() else "📄"
+
+            lbl = ctk.CTkLabel(row, text=f"{icon} {p}", anchor="w", justify="left")
+            lbl.pack(side="left", fill="x", expand=True, padx=(5, 0))
+
+            ctk.CTkButton(
+                row, text="❌", width=36,
+                command=lambda pp=p: self.remove_selected_path(pp)
+            ).pack(side="right")
+
+
+    
+    def remove_selected_path(self, path: str):
+        # 1) 데이터에서 제거
+        self.selected_paths = [p for p in (self.selected_paths or []) if p != path]
+
+        # 2) 엔트리/라벨 갱신
+        self._sync_entry_path()
+
+        # 3) 드롭존/목록 다시 그리기 (⭐ 핵심)
+        self.update_drop_zone_view()
+
+
+
     
     def on_drop_files(self, files: list[str]):
-        # files가 비었으면 그냥 종료(방어)
         if not files:
             return
 
-        first = files[0]
+        valid = []
+        for x in files:
+            p = Path(x)
+            if p.exists():
+                valid.append(str(p))
 
-        # 폴더/파일 모두 들어올 수 있음. 일단은 파일만 받는 구조로 처리
-        from pathlib import Path
-        p = Path(first)
-
-        if p.is_dir():
-            self.lbl_status.configure(text="폴더가 드롭됐어요. 현재는 파일만 지원합니다.")
-            return
-
-        if not p.exists():
+        if not valid:
             self.lbl_status.configure(text="드롭된 경로를 찾을 수 없어요.")
             return
 
-        self.set_selected_file(str(p))
+        self.add_selected_paths(valid)
 
-    def set_selected_file(self, path: str):
-        self.selected_path = path
+
+
+    def set_selected_paths(self, paths: list[str]):
+        self.selected_paths = paths
 
         self.entry_path.configure(state="normal")
         self.entry_path.delete(0, "end")
-        self.entry_path.insert(0, path)
+
+        if len(paths) == 1:
+            self.entry_path.insert(0, paths[0])
+            self.lbl_status.configure(text="선택됨")
+        else:
+            self.entry_path.insert(0, f"{len(paths)}개 선택됨")
+            self.lbl_status.configure(text=f"{len(paths)}개 선택됨")
+
+        self.entry_path.configure(state="disabled")
+        self.progress.set(0)
+        self.update_drop_zone_view()
+
+    def add_selected_paths(self, paths: list[str]):
+        paths = self._normalize_paths(paths)
+        if not paths:
+            return
+
+        self.selected_paths = self._merge_unique(self.selected_paths or [], paths)
+        self.update_drop_zone_view()
+        self._sync_entry_path()
+
+    def _sync_entry_path(self):
+        paths = self.selected_paths or []
+        self.entry_path.configure(state="normal")
+        self.entry_path.delete(0, "end")
+        if len(paths) == 0:
+            self.entry_path.insert(0, "")
+        elif len(paths) == 1:
+            self.entry_path.insert(0, paths[0])
+        else:
+            self.entry_path.insert(0, f"{len(paths)}개 선택됨")
         self.entry_path.configure(state="disabled")
 
-        self.lbl_status.configure(text="파일 선택됨 (드롭)")
-        self.progress.set(0)
 
 
+    def _normalize_paths(self, paths: list[str]) -> list[str]:
+        out = []
+        for p in paths:
+            if not p:
+                continue
+            s = str(p).strip().replace("\\", "/")
+            if s:
+                out.append(s)
+        return out
+
+    def _merge_unique(self, base: list[str], add: list[str]) -> list[str]:
+        seen = set()
+        merged = []
+        for x in base + add:
+            if x in seen:
+                continue
+            seen.add(x)
+            merged.append(x)
+        return merged
 
 
     # ---------- UI Helpers ----------
@@ -709,46 +996,49 @@ class WipeFrame(ctk.CTkFrame):
         if self.is_wiping:
             messagebox.showinfo("알림", "삭제 진행 중에는 변경할 수 없습니다.")
             return
-        self.selected_path = None
-        self.entry_path.configure(state="normal")
-        self.entry_path.delete(0, "end")
-        self.entry_path.configure(state="disabled")
+        self.selected_paths = []
         self.progress.set(0)
         self.lbl_status.configure(text="준비됨")
+        self.update_drop_zone_view()
+        self._sync_entry_path()
+
 
     def pick_file(self):
         if self.is_wiping:
-            messagebox.showinfo("알림", "삭제 진행 중에는 변경할 수 없습니다.")
             return
-        path = filedialog.askopenfilename()
-        if path:
-            self.set_path(path)
+
+        new_paths = filedialog.askopenfilenames()
+        if new_paths:
+            self.add_selected_paths(list(new_paths))
+
+
 
     # ---------- Workflow ----------
     def confirm_and_start(self):
         if self.is_wiping:
             return
 
-        path = (self.selected_path or "").strip()
-        if not path:
-            messagebox.showwarning("안내", "먼저 삭제할 파일을 선택하세요.")
+        paths = [p for p in (self.selected_paths or []) if p and str(p).strip()]
+        if not paths:
+            messagebox.showwarning("안내", "먼저 삭제할 파일/폴더를 선택하세요.")
             return
 
-        if not os.path.isfile(path):
-            messagebox.showwarning("안내", "일반 파일만 삭제할 수 있습니다.")
+        # 존재 검사
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            messagebox.showwarning("안내", f"존재하지 않는 경로가 포함되어 있습니다.\n\n{missing[0]}")
             return
 
-        # 확인 팝업
+        msg = build_wipe_confirm_message(paths)
+
         ok = messagebox.askyesno(
             "정말 영구 삭제할까요?",
-            "⚠️ 이 작업은 되돌릴 수 없습니다.\n\n"
-            "3-pass(0→1→난수) 덮어쓰기 후 파일을 삭제합니다.\n"
-            "진행하시겠습니까?"
+            msg
         )
+
         if not ok:
             return
 
-        # 시작
         self.is_wiping = True
         self.btn_run.configure(state="disabled")
         self.btn_select.configure(state="disabled")
@@ -756,24 +1046,39 @@ class WipeFrame(ctk.CTkFrame):
         self.progress.set(0)
         self.lbl_status.configure(text="삭제 준비 중...")
 
-        threading.Thread(target=self._wipe_thread, args=(path,), daemon=True).start()
+        threading.Thread(target=self._wipe_thread, args=(paths,), daemon=True).start()
 
-    def _wipe_thread(self, path: str):
-        # stage -> 화면 표시용
+
+    def _wipe_thread(self, paths: list[str]):
         stage_map = {
             "PASS1_ZERO": "PASS 1/3: 0으로 덮는 중",
             "PASS2_ONE": "PASS 2/3: 1로 덮는 중",
             "PASS3_RANDOM": "PASS 3/3: 난수로 덮는 중",
         }
 
-        def progress_cb(written, total, stage):
-            pct = 0 if total == 0 else (written / total)
-            text = stage_map.get(stage, stage)
-            self.after(0, lambda: self._update_progress(pct, text))
+        total_items = len(paths)
 
-        status, detail = self.wiper.wipe_file(path, progress_cb=progress_cb)
+        for idx, path in enumerate(paths, start=1):
+            media = get_media_type_for_path(path)
+            passes = 1 if media == "SSD" else 3  # SSD=1-pass, HDD(or UNKNOWN)=3-pass
 
-        self.after(0, lambda: self._finish(status, detail))
+            # ✅ path마다 wiper를 passes에 맞게 새로 만들어서 적용 (가장 깔끔)
+            wiper = SecureWiper(chunk_size=1024 * 1024, passes=passes)
+
+            def progress_cb(written, total, stage, _idx=idx):
+                pct = 0 if total == 0 else (written / total)
+                text = stage_map.get(stage, stage)
+                self.after(0, lambda p=pct, t=text, i=_idx:
+                        self._update_progress(p, f"[{i}/{total_items}] ({media}/{passes}-pass) {t}"))
+
+            status, detail = wiper.wipe_path(path, progress_cb=progress_cb)
+
+            if status != "SUCCESS":
+                self.after(0, lambda s=status, d=detail: self._finish(s, d))
+                return
+
+        self.after(0, lambda: self._finish("SUCCESS", "모두 삭제 완료"))
+
 
     def _update_progress(self, pct: float, text: str):
         self.progress.set(max(0.0, min(1.0, pct)))
@@ -936,16 +1241,13 @@ class CleanFrame(ctk.CTkFrame):
         self.btn_select_all = ctk.CTkButton(bottom, text="전체 선택", font=f_body, width=120, command=self.select_all)
         self.btn_select_all.pack(side="left")
 
-        self.btn_clear = ctk.CTkButton(bottom, text="선택 해제", font=f_body, width=120, fg_color="#777777",
-                                       command=self.clear_selection)
+        self.btn_clear = ctk.CTkButton(bottom, text="선택 해제", font=f_body, width=120, fg_color="#777777",command=self.clear_selection)
         self.btn_clear.pack(side="left", padx=10)
 
-        self.btn_clean = ctk.CTkButton(bottom, text="선택 삭제", height=45, font=f_body, fg_color="#27AE60",
-                                       command=self.clean_selected)
+        self.btn_clean = ctk.CTkButton(bottom, text="선택 삭제", height=45, font=f_body, fg_color="#27AE60",command=self.clean_selected)
         self.btn_clean.pack(side="right")
 
-        self.btn_clean_all = ctk.CTkButton(bottom, text="전체 삭제", height=45, font=f_body, fg_color="#C0392B",
-                                           command=self.clean_all)
+        self.btn_clean_all = ctk.CTkButton(bottom, text="전체 삭제", height=45, font=f_body, fg_color="#C0392B",command=self.clean_all)
         self.btn_clean_all.pack(side="right", padx=10)
 
         self._render_empty("스캔 결과가 여기에 표시됩니다.")
