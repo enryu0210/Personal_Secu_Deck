@@ -811,14 +811,11 @@ class WipeFrame(ctk.CTkFrame):
         # ---- 아래는 그대로 ----
         lines = []
         for p in paths[:5]:
-            name = Path(p).name
             icon = "📁" if Path(p).is_dir() else "📄"
-            lines.append(f"{icon} {name}")
+            lines.append(f"{icon} {p}")
 
         if len(paths) > 5:
             lines.append(f"... 외 {len(paths) - 5}개")
-
-        text = "\n".join(lines) + f"\n\n총 {len(paths)}개 선택됨"
 
         # 선택된 게 있을 때
         self.lbl_drop.configure(text=f"총 {len(paths)}개 선택됨", wraplength=520)
@@ -834,10 +831,10 @@ class WipeFrame(ctk.CTkFrame):
             row = ctk.CTkFrame(self.sel_list, fg_color="transparent")
             row.pack(fill="x", pady=2)
 
-            name = Path(p).name
             icon = "📁" if Path(p).is_dir() else "📄"
 
-            ctk.CTkLabel(row, text=f"{icon} {name}", anchor="w").pack(side="left", fill="x", expand=True)
+            lbl = ctk.CTkLabel(row, text=f"{icon} {p}", anchor="w", justify="left")
+            lbl.pack(side="left", fill="x", expand=True, padx=(5, 0))
 
             ctk.CTkButton(
                 row, text="❌", width=36,
