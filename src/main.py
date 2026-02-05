@@ -7,6 +7,7 @@ import tempfile
 import math
 import json
 import re
+import subprocess
 from pathlib import Path
 from tkinterdnd2 import TkinterDnD
 from datetime import datetime
@@ -67,34 +68,63 @@ def bind_drop_files(widget, on_files) -> bool:
         return False
 
 def get_media_type_for_path(path: str) -> str:
-    drive_root = os.path.splitdrive(os.path.abspath(path))[0]  # "C:"
-    drive = drive_root.replace(":", "")
-
-    ps = f"""
-    $p = Get-Partition -DriveLetter {drive} -ErrorAction SilentlyContinue
-    if ($null -eq $p) {{ @{{type="UNKNOWN"}} | ConvertTo-Json; exit }}
-    $d = Get-Disk -Number $p.DiskNumber
-    @{{type=$d.MediaType.ToString()}} | ConvertTo-Json
-    """
     try:
-        out = subprocess.check_output(["powershell", "-NoProfile", "-Command", ps], text=True).strip()
-        t = (json.loads(out).get("type") or "").upper()
+        # 1. 경로 절대경로로 변환 및 드라이브 문자 추출 (예: "C")
+        abs_path = os.path.abspath(path)
+        drive_root = os.path.splitdrive(abs_path)[0] # "C:"
+        drive_letter = drive_root.replace(":", "").upper()
 
-        if "SSD" in t:
+        if not drive_letter:
+            return "UNKNOWN"
+
+        # 2. PowerShell 명령어 (에러 발생 시 JSON 파싱 에러 방지를 위해 try-catch 내장)
+        # Get-Partition -> Get-Disk -> MediaType 확인
+        ps_command = f"""
+        try {{
+            $p = Get-Partition -DriveLetter {drive_letter} -ErrorAction Stop
+            $d = Get-Disk -Number $p.DiskNumber -ErrorAction Stop
+            $type = $d.MediaType
+            if (-not $type) {{ $type = "Unspecified" }}
+            @{{type=$type.ToString()}} | ConvertTo-Json -Compress
+        }} catch {{
+            @{{type="ERROR"}} | ConvertTo-Json -Compress
+        }}
+        """
+
+        # 3. 서브프로세스 실행 (콘솔 창 안 뜨게 설정)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        
+        output = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", ps_command],
+            text=True,
+            startupinfo=startupinfo  # 검은색 팝업창 방지
+        ).strip()
+
+        # 4. JSON 파싱 및 결과 판단
+        try:
+            data = json.loads(output)
+            media_type = data.get("type", "").upper()
+        except json.JSONDecodeError:
+            media_type = "ERROR"
+
+        # 5. 결과 매핑
+        if "SSD" in media_type:
             return "SSD"
-        if "HDD" in t:
+        elif "HDD" in media_type:
             return "HDD"
+        else:
+            # USB나 가상 드라이브 등 판별 불가 시
+            # C드라이브는 요즘 99% SSD이므로 SSD로 추정
+            if drive_letter == "C":
+                return "SSD"
+            # 나머지는 안전하게(강력하게) 지우기 위해 HDD로 간주
+            return "HDD" 
 
-        # ✅ 보정: C:는 보통 SSD (판별 실패 시)
-        if drive_root.upper() == "C:":
-            return "SSD"
-
-        return "UNKNOWN"
-    except Exception:
-        # ✅ 보정: 예외여도 C:는 SSD로
-        if drive_root.upper() == "C:":
-            return "SSD"
-        return "UNKNOWN"
+    except Exception as e:
+        print(f"디스크 판별 오류: {e}")
+        # 에러 나면 안전하게 HDD 방식(3-pass) 적용
+        return "HDD"
 
 
 def summarize_media_types(paths: list[str]) -> dict:
