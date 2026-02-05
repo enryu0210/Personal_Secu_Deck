@@ -18,8 +18,9 @@ class SecureWiper:
     "NOT_FOUND", "INVALID", "IO_ERROR", "UNKNOWN"
     """
 
-    def __init__(self, chunk_size=1024 * 1024):
+    def __init__(self, chunk_size=1024 * 1024, passes=3):
         self.chunk_size = chunk_size
+        self.passes = passes
 
     def is_system_protected_path(self, path: str) -> bool:
         """
@@ -66,9 +67,12 @@ class SecureWiper:
 
             # r+b: 바이너리 read/write. 다른 프로세스가 잡고 있거나 권한이 없으면 여기서 예외 가능
             with open(path, "r+b", buffering=0) as f:
-                self._overwrite(f, total, pattern=0x00, stage="PASS1_ZERO", progress_cb=progress_cb)
-                self._overwrite(f, total, pattern=0xFF, stage="PASS2_ONE", progress_cb=progress_cb)
-                self._overwrite(f, total, pattern=None, stage="PASS3_RANDOM", progress_cb=progress_cb)
+                if self.passes >= 1:
+                    self._overwrite(f, total, pattern=0x00, stage="PASS1_ZERO", progress_cb=progress_cb)
+                if self.passes >= 2:
+                    self._overwrite(f, total, pattern=0xFF, stage="PASS2_ONE", progress_cb=progress_cb)
+                if self.passes >= 3:
+                    self._overwrite(f, total, pattern=None, stage="PASS3_RANDOM", progress_cb=progress_cb)
 
             os.remove(path)
             return "SUCCESS", "삭제 완료"

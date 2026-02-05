@@ -66,6 +66,88 @@ def bind_drop_files(widget, on_files) -> bool:
     except Exception:
         return False
 
+def get_media_type_for_path(path: str) -> str:
+    drive_root = os.path.splitdrive(os.path.abspath(path))[0]  # "C:"
+    drive = drive_root.replace(":", "")
+
+    ps = f"""
+    $p = Get-Partition -DriveLetter {drive} -ErrorAction SilentlyContinue
+    if ($null -eq $p) {{ @{{type="UNKNOWN"}} | ConvertTo-Json; exit }}
+    $d = Get-Disk -Number $p.DiskNumber
+    @{{type=$d.MediaType.ToString()}} | ConvertTo-Json
+    """
+    try:
+        out = subprocess.check_output(["powershell", "-NoProfile", "-Command", ps], text=True).strip()
+        t = (json.loads(out).get("type") or "").upper()
+
+        if "SSD" in t:
+            return "SSD"
+        if "HDD" in t:
+            return "HDD"
+
+        # ✅ 보정: C:는 보통 SSD (판별 실패 시)
+        if drive_root.upper() == "C:":
+            return "SSD"
+
+        return "UNKNOWN"
+    except Exception:
+        # ✅ 보정: 예외여도 C:는 SSD로
+        if drive_root.upper() == "C:":
+            return "SSD"
+        return "UNKNOWN"
+
+
+def summarize_media_types(paths: list[str]) -> dict:
+    """
+    paths를 SSD/HDD/UNKNOWN으로 분류해서 요약 반환
+    return 예:
+    {
+      "SSD": ["C:\\a.txt", ...],
+      "HDD": ["D:\\b.txt", ...],
+      "UNKNOWN": ["E:\\c.txt", ...],
+    }
+    """
+    buckets = {"SSD": [], "HDD": [], "UNKNOWN": []}
+    for p in paths:
+        mt = get_media_type_for_path(p)
+        if mt not in buckets:
+            mt = "UNKNOWN"
+        buckets[mt].append(p)
+    return buckets
+
+def build_wipe_confirm_message(paths: list[str]) -> str:
+    b = summarize_media_types(paths)
+    ssd_n = len(b["SSD"])
+    hdd_n = len(b["HDD"])
+    unk_n = len(b["UNKNOWN"])
+    total = len(paths)
+
+    lines = []
+    lines.append("⚠️ 이 작업은 되돌릴 수 없습니다.\n")
+    lines.append(f"선택 항목: {total}개\n")
+
+    # SSD/HDD 안내 문구
+    if total == 1:
+        # 단일 선택이면 더 직관적으로
+        if ssd_n == 1:
+            lines.append("• 저장장치: SSD 감지\n")
+            lines.append("• 방식: 1-pass overwrite (NIST SP 800-88) 후 삭제\n")
+        elif hdd_n == 1 or unk_n == 1:
+            # UNKNOWN은 보수적으로 HDD 방식으로 안내
+            lines.append(f"• 저장장치: {'HDD 감지' if hdd_n == 1 else '판별 불가(보수 적용)'}\n")
+            lines.append("• 방식: 3-pass overwrite (DoD 5220.22-M) 후 삭제\n")
+    else:
+        # 여러 개면 요약
+        lines.append("• 파일 위치별 적용 방식:\n")
+        if ssd_n:
+            lines.append(f"   - SSD: {ssd_n}개 → 1-pass overwrite (NIST SP 800-88)\n")
+        if hdd_n:
+            lines.append(f"   - HDD: {hdd_n}개 → 3-pass overwrite (DoD 5220.22-M)\n")
+        if unk_n:
+            lines.append(f"   - 판별 불가: {unk_n}개 → 안전을 위해 HDD 방식(3-pass) 적용\n")
+
+    lines.append("\n진행하시겠습니까?")
+    return "".join(lines)
 
 # --- 초기 설정 ---
 # ctk.set_appearance_mode("Dark")
@@ -871,13 +953,13 @@ class WipeFrame(ctk.CTkFrame):
             messagebox.showwarning("안내", f"존재하지 않는 경로가 포함되어 있습니다.\n\n{missing[0]}")
             return
 
+        msg = build_wipe_confirm_message(paths)
+
         ok = messagebox.askyesno(
             "정말 영구 삭제할까요?",
-            "⚠️ 이 작업은 되돌릴 수 없습니다.\n\n"
-            f"선택 항목: {len(paths)}개\n"
-            "3-pass(0→1→난수) 덮어쓰기 후 삭제합니다.\n"
-            "진행하시겠습니까?"
+            msg
         )
+
         if not ok:
             return
 
@@ -901,21 +983,26 @@ class WipeFrame(ctk.CTkFrame):
         total_items = len(paths)
 
         for idx, path in enumerate(paths, start=1):
-            def progress_cb(written, total, stage):
+            media = get_media_type_for_path(path)
+            passes = 1 if media == "SSD" else 3  # SSD=1-pass, HDD(or UNKNOWN)=3-pass
+
+            # ✅ path마다 wiper를 passes에 맞게 새로 만들어서 적용 (가장 깔끔)
+            wiper = SecureWiper(chunk_size=1024 * 1024, passes=passes)
+
+            def progress_cb(written, total, stage, _idx=idx):
                 pct = 0 if total == 0 else (written / total)
                 text = stage_map.get(stage, stage)
-                self.after(0, lambda p=pct, t=text, i=idx:
-                        self._update_progress(p, f"[{i}/{total_items}] {t}"))
+                self.after(0, lambda p=pct, t=text, i=_idx:
+                        self._update_progress(p, f"[{i}/{total_items}] ({media}/{passes}-pass) {t}"))
 
-            # ✅ 여기서부터는 secure_wiper.py에 wipe_path / wipe_folder를 추가한 경우
-            status, detail = self.wiper.wipe_path(path, progress_cb=progress_cb)  # (권장)
-            # 만약 아직 wipe_path를 안 만들었으면: 파일이면 wipe_file, 폴더면 wipe_folder로 분기해야 함
+            status, detail = wiper.wipe_path(path, progress_cb=progress_cb)
 
             if status != "SUCCESS":
                 self.after(0, lambda s=status, d=detail: self._finish(s, d))
                 return
 
         self.after(0, lambda: self._finish("SUCCESS", "모두 삭제 완료"))
+
 
     def _update_progress(self, pct: float, text: str):
         self.progress.set(max(0.0, min(1.0, pct)))
