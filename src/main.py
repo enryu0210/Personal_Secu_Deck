@@ -609,18 +609,29 @@ class WipeFrame(ctk.CTkFrame):
         self.drop_zone.pack(fill="x", padx=20, pady=10)
         self.drop_zone.pack_propagate(False)
 
-        self.lbl_drop = ctk.CTkLabel(self.drop_zone, text="이곳에 파일을 드래그(옵션)하거나\n아래 버튼으로 파일을 선택하세요",
-                                     font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold"))
-        self.lbl_drop.place(relx=0.5, rely=0.35, anchor="center")
+        # 드롭존 내부 컨텐츠 프레임(가운데 정렬용)
+        self.drop_content = ctk.CTkFrame(self.drop_zone, fg_color="transparent")
+        self.drop_content.pack(fill="x", expand=True, padx=30, pady=10)
+
+
+        self.lbl_drop = ctk.CTkLabel(
+            self.drop_content,
+            text="이곳에 파일을 드래그(옵션)하거나\n아래 버튼으로 파일을 선택하세요",
+            font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold"),
+            justify="center",
+            wraplength=520
+        )
+        self.lbl_drop.pack(pady=(20, 12), padx=10)
 
         self.btn_select = ctk.CTkButton(
-            self.drop_zone,
+            self.drop_content,
             text="📁 파일 선택하기",
             font=f_body,
             height=42,
             command=self.pick_file
         )
-        self.btn_select.place(relx=0.5, rely=0.62, anchor="center")
+        self.btn_select.pack(pady=(0, 20))
+
 
         # 선택된 파일 표시
         path_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -631,8 +642,7 @@ class WipeFrame(ctk.CTkFrame):
         self.entry_path.pack(side="left", fill="x", expand=True, padx=(10, 10))
         self.entry_path.configure(state="disabled")
 
-        self.btn_clear = ctk.CTkButton(path_row, text="지우기", width=90, fg_color="#555555",
-                                       font=f_body, command=self.clear_file)
+        self.btn_clear = ctk.CTkButton(path_row, text="지우기", width=90, fg_color="#555555", font=f_body, command=self.clear_file)
         self.btn_clear.pack(side="right")
 
         # 진행 상태
@@ -661,6 +671,35 @@ class WipeFrame(ctk.CTkFrame):
         if not (ok1 or ok2):
                 # 루트가 TkinterDnD 기반이 아니면 DnD 메서드가 없어서 여기로 빠질 수 있음
                 self.lbl_drop.configure(text="(드래그앤드롭 비활성)\n아래 버튼으로 파일을 선택하세요")
+        # ⭐ 초기 드롭존 상태 세팅
+        self.update_drop_zone_view()
+
+    
+    def update_drop_zone_view(self):
+        paths = self.selected_paths or []
+
+        # 1️⃣ 아무것도 선택 안 됐을 때 (초기 화면)
+        if not paths:
+            self.lbl_drop.configure(
+                text="이곳에 파일을 드래그(옵션)하거나\n아래 버튼으로 파일을 선택하세요"
+            )
+            self.btn_select.configure(text="📁 파일 선택하기")
+            return
+
+        lines = []
+        for p in paths[:5]:  # 너무 많으면 최대 5개까지만
+            name = Path(p).name
+            icon = "📁" if Path(p).is_dir() else "📄"
+            lines.append(f"{icon} {name}")
+
+        if len(paths) > 5:
+            lines.append(f"... 외 {len(paths) - 5}개")
+
+        text = "\n".join(lines) + f"\n\n총 {len(paths)}개 선택됨"
+
+        self.lbl_drop.configure(wraplength=520, text=text)
+        self.btn_select.configure(text="🔁 다시 선택하기")
+
     
     def on_drop_files(self, files: list[str]):
         if not files:
@@ -698,6 +737,7 @@ class WipeFrame(ctk.CTkFrame):
 
         self.entry_path.configure(state="disabled")
         self.progress.set(0)
+        self.update_drop_zone_view()
 
 
     # ---------- UI Helpers ----------
@@ -718,6 +758,7 @@ class WipeFrame(ctk.CTkFrame):
         self.entry_path.configure(state="disabled")
         self.progress.set(0)
         self.lbl_status.configure(text="준비됨")
+        self.update_drop_zone_view()
 
     def pick_file(self):
         if self.is_wiping:
