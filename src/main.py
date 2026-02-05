@@ -621,7 +621,11 @@ class WipeFrame(ctk.CTkFrame):
             justify="center",
             wraplength=520
         )
-        self.lbl_drop.pack(pady=(20, 12), padx=10)
+        self.lbl_drop.pack(pady=(16, 12), padx=10)
+
+        self.sel_list = ctk.CTkScrollableFrame(self.drop_content, height=90, fg_color="transparent")
+        self.sel_list.pack(fill="x", padx=10, pady=(0, 10))
+        self.sel_list.pack_forget()  # 처음엔 숨김
 
         self.btn_select = ctk.CTkButton(
             self.drop_content,
@@ -684,10 +688,17 @@ class WipeFrame(ctk.CTkFrame):
                 text="이곳에 파일을 드래그(옵션)하거나\n아래 버튼으로 파일을 선택하세요"
             )
             self.btn_select.configure(text="📁 파일 선택하기")
+
+            # ⭐ 추가: 목록 UI 정리(잔상 제거)
+            for w in self.sel_list.winfo_children():
+                w.destroy()
+            self.sel_list.pack_forget()
+
             return
 
+        # ---- 아래는 그대로 ----
         lines = []
-        for p in paths[:5]:  # 너무 많으면 최대 5개까지만
+        for p in paths[:5]:
             name = Path(p).name
             icon = "📁" if Path(p).is_dir() else "📄"
             lines.append(f"{icon} {name}")
@@ -697,29 +708,61 @@ class WipeFrame(ctk.CTkFrame):
 
         text = "\n".join(lines) + f"\n\n총 {len(paths)}개 선택됨"
 
-        self.lbl_drop.configure(wraplength=520, text=text)
+        # 선택된 게 있을 때
+        self.lbl_drop.configure(text=f"총 {len(paths)}개 선택됨", wraplength=520)
         self.btn_select.configure(text="🔁 다시 선택하기")
+
+        # --- 선택 목록 렌더링 ---
+        for w in self.sel_list.winfo_children():
+            w.destroy()
+
+        self.sel_list.pack(fill="x", padx=10, pady=(0, 10))
+
+        for p in paths:
+            row = ctk.CTkFrame(self.sel_list, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+
+            name = Path(p).name
+            icon = "📁" if Path(p).is_dir() else "📄"
+
+            ctk.CTkLabel(row, text=f"{icon} {name}", anchor="w").pack(side="left", fill="x", expand=True)
+
+            ctk.CTkButton(
+                row, text="❌", width=36,
+                command=lambda pp=p: self.remove_selected_path(pp)
+            ).pack(side="right")
+
+
+    
+    def remove_selected_path(self, path: str):
+        # 1) 데이터에서 제거
+        self.selected_paths = [p for p in (self.selected_paths or []) if p != path]
+
+        # 2) 엔트리/라벨 갱신
+        self._sync_entry_path()
+
+        # 3) 드롭존/목록 다시 그리기 (⭐ 핵심)
+        self.update_drop_zone_view()
+
+
 
     
     def on_drop_files(self, files: list[str]):
         if not files:
             return
 
-        from pathlib import Path
-
-        # 존재하는 것만 필터링
         valid = []
         for x in files:
             p = Path(x)
             if p.exists():
                 valid.append(str(p))
-        
+
         if not valid:
             self.lbl_status.configure(text="드롭된 경로를 찾을 수 없어요.")
             return
 
-        # 여러 개(파일/폴더) 선택 상태로 세팅
-        self.set_selected_paths(valid)
+        self.add_selected_paths(valid)
+
 
 
     def set_selected_paths(self, paths: list[str]):
@@ -739,6 +782,49 @@ class WipeFrame(ctk.CTkFrame):
         self.progress.set(0)
         self.update_drop_zone_view()
 
+    def add_selected_paths(self, paths: list[str]):
+        paths = self._normalize_paths(paths)
+        if not paths:
+            return
+
+        self.selected_paths = self._merge_unique(self.selected_paths or [], paths)
+        self.update_drop_zone_view()
+        self._sync_entry_path()
+
+    def _sync_entry_path(self):
+        paths = self.selected_paths or []
+        self.entry_path.configure(state="normal")
+        self.entry_path.delete(0, "end")
+        if len(paths) == 0:
+            self.entry_path.insert(0, "")
+        elif len(paths) == 1:
+            self.entry_path.insert(0, paths[0])
+        else:
+            self.entry_path.insert(0, f"{len(paths)}개 선택됨")
+        self.entry_path.configure(state="disabled")
+
+
+
+    def _normalize_paths(self, paths: list[str]) -> list[str]:
+        out = []
+        for p in paths:
+            if not p:
+                continue
+            s = str(p).strip().replace("\\", "/")
+            if s:
+                out.append(s)
+        return out
+
+    def _merge_unique(self, base: list[str], add: list[str]) -> list[str]:
+        seen = set()
+        merged = []
+        for x in base + add:
+            if x in seen:
+                continue
+            seen.add(x)
+            merged.append(x)
+        return merged
+
 
     # ---------- UI Helpers ----------
     def set_path(self, path: str):
@@ -753,20 +839,20 @@ class WipeFrame(ctk.CTkFrame):
             messagebox.showinfo("알림", "삭제 진행 중에는 변경할 수 없습니다.")
             return
         self.selected_paths = []
-        self.entry_path.configure(state="normal")
-        self.entry_path.delete(0, "end")
-        self.entry_path.configure(state="disabled")
         self.progress.set(0)
         self.lbl_status.configure(text="준비됨")
         self.update_drop_zone_view()
+        self._sync_entry_path()
+
 
     def pick_file(self):
         if self.is_wiping:
             return
 
-        paths = filedialog.askopenfilenames()
-        if paths:
-            self.set_selected_paths(list(paths))
+        new_paths = filedialog.askopenfilenames()
+        if new_paths:
+            self.add_selected_paths(list(new_paths))
+
 
 
     # ---------- Workflow ----------
