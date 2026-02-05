@@ -447,11 +447,13 @@ class DashboardFrame(ctk.CTkFrame):
     
 # --- 나머지 프레임들은 동일 ---
 
-# --- [수정됨] 삭제 로직을 비워둔 ScanFrame ---
 class ScanFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):
         super().__init__(master, corner_radius=0, fg_color="transparent")
         self.scanner = SensitiveDataScanner()
+        # [New] 보안 삭제 엔진 장착 (여기서 SecureWiper를 불러옵니다)
+        self.wiper = SecureWiper() 
+
         self.is_scanning = False
         self.master_app = master 
         self.current_alert_count = 0 
@@ -477,13 +479,67 @@ class ScanFrame(ctk.CTkFrame):
         self.lbl_status = ctk.CTkLabel(self, text="준비됨", font=f_body)
         self.lbl_status.pack(pady=5)
         
-        # 프로그레스바 (일단 생성만 해둠)
+        # 프로그레스바
         self.progress = ctk.CTkProgressBar(self)
         self.progress.set(0)
 
         self.result_area = ctk.CTkScrollableFrame(self, label_text="스캔 결과", label_font=f_body)
         self.result_area.pack(fill="both", expand=True, padx=20, pady=20)
 
+    # [수정됨] 보안 삭제 요청 처리 함수 (실제 삭제 로직 연결)
+    def request_secure_delete(self, file_path, card_widget):
+        # 1. 사용자 확인 (가장 중요)
+        if not messagebox.askyesno("영구 삭제 확인", 
+            f"정말 삭제하시겠습니까?\n\n파일: {os.path.basename(file_path)}\n\n⚠️ 주의: 보안 덮어쓰기가 수행되며, 절대 복구할 수 없습니다."):
+            return
+
+        # 2. UI 멈춤 방지를 위해 스레드로 실행
+        threading.Thread(target=self._run_secure_delete, args=(file_path, card_widget), daemon=True).start()
+
+    # [New] 실제 삭제를 수행하는 내부 함수 (스레드용)
+    def _run_secure_delete(self, file_path, card_widget):
+        # 보안 삭제 엔진 가동
+        status, detail = self.wiper.wipe_file(file_path)
+        
+        # 결과 처리는 메인 UI 스레드에서 해야 안전함
+        self.after(0, lambda: self._handle_delete_result(status, detail, card_widget))
+
+    # [New] 삭제 결과에 따라 UI를 갱신하는 함수
+    def _handle_delete_result(self, status, detail, card_widget):
+        if status == "SUCCESS":
+            messagebox.showinfo("삭제 완료", "파일이 안전하게 영구 삭제되었습니다.")
+            
+            # 1. 카드 제거
+            card_widget.destroy()
+            
+            # 2. 카운트 감소 및 대시보드 갱신
+            if self.current_alert_count > 0:
+                self.current_alert_count -= 1
+            
+            self.lbl_status.configure(text=f"분석 완료! 총 {self.current_alert_count}개의 파일이 감지되었습니다.")
+            
+            try:
+                self.master_app.dashboard_frame.update_scan_ui(self.current_alert_count)
+            except: pass
+            
+            # 3. 다 지워서 목록이 비었을 때 메시지 표시
+            if self.current_alert_count == 0:
+                # 결과창이 비었으면 안내 메시지 추가
+                for widget in self.result_area.winfo_children(): widget.destroy()
+                ctk.CTkLabel(self.result_area, text="모든 항목이 처리되었습니다.").pack(pady=20)
+                
+        else:
+            # 실패 사유별 친절한 에러 메시지
+            msg_map = {
+                "IN_USE": "파일이 현재 사용 중입니다.\n관련 프로그램을 종료하고 다시 시도해주세요.",
+                "PERMISSION": "삭제 권한이 없습니다.\n관리자 권한으로 실행하거나 파일 권한을 확인하세요.",
+                "SYSTEM_BLOCKED": "시스템 보호 파일은 안전을 위해 삭제가 차단됩니다.",
+                "NOT_FOUND": "파일을 찾을 수 없습니다.\n이미 삭제되었거나 이동되었을 수 있습니다."
+            }
+            err_msg = msg_map.get(status, f"오류 발생: {detail}")
+            messagebox.showerror("삭제 실패", err_msg)
+
+    # --- 이하 기존 코드 유지 ---
     def reset_ui(self):
         self.is_scanning = False
         self.cached_results = []
@@ -492,7 +548,6 @@ class ScanFrame(ctk.CTkFrame):
         self.btn_start.configure(state="normal", text="스캔 시작")
         self.lbl_status.configure(text="준비됨")
         
-        # 리셋 시 프로그레스바 숨기기
         self.progress.set(0)
         self.progress.pack_forget()
         
@@ -506,10 +561,9 @@ class ScanFrame(ctk.CTkFrame):
         self.is_scanning = True
         self.btn_start.configure(state="disabled", text="스캔 중...")
         
-        # [수정됨] before 옵션 에러 해결법: "뺐다가 다시 넣기"
-        self.result_area.pack_forget()             # 1. 결과창을 잠시 숨김
-        self.progress.pack(fill="x", padx=40, pady=5) # 2. 프로그레스바를 넣음 (이러면 맨 아래에 붙음)
-        self.result_area.pack(fill="both", expand=True, padx=20, pady=20) # 3. 결과창을 다시 넣음 (바 아래에 붙음)
+        self.result_area.pack_forget()
+        self.progress.pack(fill="x", padx=40, pady=5)
+        self.result_area.pack(fill="both", expand=True, padx=20, pady=20)
         
         for widget in self.result_area.winfo_children(): widget.destroy()
         threading.Thread(target=self.run_scan, daemon=True).start()
@@ -523,7 +577,6 @@ class ScanFrame(ctk.CTkFrame):
             results = self.scanner.start_scan(update_progress)
             self.after(0, lambda: self.show_results(results))
         except Exception as e:
-            # 에러 발생 시 처리
             print(f"스캔 오류: {e}")
             self.after(0, lambda: self.handle_scan_error(e))
 
@@ -531,7 +584,6 @@ class ScanFrame(ctk.CTkFrame):
         self.reset_ui() 
         messagebox.showerror("스캔 오류", f"스캔 도중 문제가 발생하여 중단되었습니다.\n\n[에러 내용]\n{error_msg}")
 
-    # --- 아래는 기존과 동일 ---
     def load_ignore_list(self):
         if not os.path.exists(self.ignore_file): return []
         try:
@@ -547,9 +599,6 @@ class ScanFrame(ctk.CTkFrame):
     def refresh_view(self):
         if self.cached_results:
             self.show_results(self.cached_results)
-
-    def request_secure_delete(self, file_path, card_widget):
-        messagebox.showinfo("알림", "보안 삭제 모듈 연동 예정")
 
     def dismiss_card_permanently(self, file_path, card_widget):
         if not messagebox.askyesno("검사 예외 처리", f"이 파일을 무시하시겠습니까?\n(체크박스를 켜야 다시 볼 수 있습니다)"):
@@ -571,7 +620,6 @@ class ScanFrame(ctk.CTkFrame):
         self.cached_results = results 
         self.btn_start.configure(state="normal", text="다시 스캔하기")
         
-        # 완료되면 프로그레스바 숨기기
         self.progress.pack_forget()
 
         filtered_results = []
@@ -669,6 +717,7 @@ class ScanFrame(ctk.CTkFrame):
                                        command=toggle_details)
             btn_toggle.pack(side="right", padx=2)
 
+            # [수정됨] 삭제 버튼 클릭 시 새로 만든 request_secure_delete 호출
             ctk.CTkButton(btn_frame, text="삭제", width=50, height=30, fg_color="#C0392B", hover_color="#922B21",
                           command=lambda p=file_path, c=card: self.request_secure_delete(p, c)).pack(side="right", padx=2)
             
