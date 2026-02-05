@@ -2,19 +2,77 @@ import customtkinter as ctk
 import os
 import threading
 import json
+import re
+from pathlib import Path
+from tkinterdnd2 import TkinterDnD
 from tkinter import messagebox
 from tkinter import filedialog
 from startup_checker import StartupMonitor
 from scanner import SensitiveDataScanner
 from secure_wiper import SecureWiper
 
-# --- 초기 설정 ---
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
+# --- 유틸 영역 ---
+def parse_dnd_files(data: str) -> list[str]:
+    """TkDND event.data 문자열에서 파일/폴더 경로들을 파싱."""
+    if not data:
+        return []
+    s = data.strip()
 
-class App(ctk.CTk):
+    # { ... }로 감싸진 케이스(공백 포함 경로)
+    if "{" in s and "}" in s:
+        items = re.findall(r"\{([^}]*)\}", s)
+        files = [it.strip() for it in items if it.strip()]
+    else:
+        # 공백으로 분리되는 케이스(공백 없는 경로들)
+        files = [it.strip() for it in s.split() if it.strip()]
+
+    # 정규화
+    out = []
+    for f in files:
+        f = f.replace("\\", "/")
+        out.append(f)
+    return out
+
+
+def bind_drop_files(widget, on_files) -> bool:
+    """
+    widget에 파일 드롭을 바인딩.
+    on_files: (list[str]) -> None
+    """
+    if not hasattr(widget, "drop_target_register") or not hasattr(widget, "dnd_bind"):
+        return False
+
+    try:
+        try:
+            from tkinterdnd2 import DND_FILES
+        except Exception:
+            DND_FILES = "DND_Files"
+
+        widget.drop_target_register(DND_FILES)
+
+        def _on_drop(event):
+            files = parse_dnd_files(getattr(event, "data", ""))
+            if files:
+                on_files(files)
+
+        widget.dnd_bind("<<Drop>>", _on_drop)
+        return True
+    except Exception:
+        return False
+
+
+# --- 초기 설정 ---
+# ctk.set_appearance_mode("Dark")
+# ctk.set_default_color_theme("blue")
+
+
+class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
+
+        # ✅ Tk 루트 흰색 비침 방지: 전체 덮는 CTk 배경 레이어
+        self.bg_layer = ctk.CTkFrame(self, corner_radius=0, fg_color=("#F3F3F3", "#111111"))
+        self.bg_layer.pack(fill="both", expand=True)
 
         # 1. 윈도우 설정
         self.title("AI Security Guardian")
@@ -28,11 +86,11 @@ class App(ctk.CTk):
         self.font_bold = ctk.CTkFont(family="Malgun Gothic", size=14, weight="bold")
 
         # 2. 그리드 레이아웃
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.bg_layer.grid_columnconfigure(1, weight=1)
+        self.bg_layer.grid_rowconfigure(0, weight=1)
 
         # 3. 사이드바 (메뉴)
-        self.sidebar_frame = ctk.CTkFrame(self, width=200, corner_radius=0)
+        self.sidebar_frame = ctk.CTkFrame(self.bg_layer, width=200, corner_radius=0)
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
         self.sidebar_frame.grid_rowconfigure(6, weight=1)
 
@@ -48,12 +106,12 @@ class App(ctk.CTk):
 
         # 4. 프레임 초기화
         # DashboardFrame에 '앱(self)' 자체를 넘겨서, 앱의 함수(show_scan 등)를 호출할 수 있게 함
-        self.dashboard_frame = DashboardFrame(self, self.font_title, self.font_subtitle, self.font_body, app_instance=self)
-        self.scan_frame = ScanFrame(self, self.font_title, self.font_body)
-        self.wipe_frame = WipeFrame(self, self.font_title, self.font_body)
-        self.clean_frame = CleanFrame(self, self.font_title, self.font_body)
-        self.startup_frame = StartupFrame(self, self.font_title, self.font_body)
-        self.ai_frame = AIFrame(self, self.font_title, self.font_body)
+        self.dashboard_frame = DashboardFrame(self.bg_layer, self.font_title, self.font_subtitle, self.font_body, app_instance=self)
+        self.scan_frame = ScanFrame(self.bg_layer, self.font_title, self.font_body)
+        self.wipe_frame = WipeFrame(self.bg_layer, self.font_title, self.font_body)
+        self.clean_frame = CleanFrame(self.bg_layer, self.font_title, self.font_body)
+        self.startup_frame = StartupFrame(self.bg_layer, self.font_title, self.font_body)
+        self.ai_frame = AIFrame(self.bg_layer, self.font_title, self.font_body)
 
         self.select_frame_by_name("dashboard")
 
@@ -508,6 +566,48 @@ class WipeFrame(ctk.CTkFrame):
             command=self.confirm_and_start
         )
         self.btn_run.pack(fill="x", padx=20, pady=(8, 18))
+
+                # --- DnD 바인딩 (옵션) ---
+        ok1 = bind_drop_files(self.drop_zone, self.on_drop_files)
+        ok2 = bind_drop_files(self.lbl_drop, self.on_drop_files)  # 라벨 위에 떨어뜨려도 동작
+        if not (ok1 or ok2):
+                # 루트가 TkinterDnD 기반이 아니면 DnD 메서드가 없어서 여기로 빠질 수 있음
+                self.lbl_drop.configure(text="(드래그앤드롭 비활성)\n아래 버튼으로 파일을 선택하세요")
+    
+    def on_drop_files(self, files: list[str]):
+        # files가 비었으면 그냥 종료(방어)
+        if not files:
+            return
+
+        first = files[0]
+
+        # 폴더/파일 모두 들어올 수 있음. 일단은 파일만 받는 구조로 처리
+        from pathlib import Path
+        p = Path(first)
+
+        if p.is_dir():
+            self.lbl_status.configure(text="폴더가 드롭됐어요. 현재는 파일만 지원합니다.")
+            return
+
+        if not p.exists():
+            self.lbl_status.configure(text="드롭된 경로를 찾을 수 없어요.")
+            return
+
+        self.set_selected_file(str(p))
+
+    def set_selected_file(self, path: str):
+        self.selected_path = path
+
+        self.entry_path.configure(state="normal")
+        self.entry_path.delete(0, "end")
+        self.entry_path.insert(0, path)
+        self.entry_path.configure(state="disabled")
+
+        self.lbl_status.configure(text="파일 선택됨 (드롭)")
+        self.progress.set(0)
+
+
+
 
     # ---------- UI Helpers ----------
     def set_path(self, path: str):
