@@ -1733,7 +1733,23 @@ class StartupFrame(ctk.CTkFrame):
         row.pack(fill="x", pady=5)
         
         icon = "🆕" if is_new else "🔹"
-        info = f"{item['name']}\n{item['path']}"
+
+        # 날짜 텍스트
+        days_text = ""
+        if not is_new and 'days' in item:
+            if item['days'] == 0: days_text = " (오늘)"
+            else: days_text = f" ({item['days']}일 됨)"
+
+        # [핵심] 실행 상태 및 메모리 확인 (실시간 체크)
+        # item['path']에서 따옴표(") 제거 처리 필요 (레지스트리 값엔 종종 포함됨)
+        clean_path = item['path'].replace('"', '')
+        status_text = self.monitor.get_process_status(clean_path)
+
+        # 표시할 텍스트 조합
+        # 이름 (30일 됨)
+        # 상태: 실행 중 (150MB)
+        # 경로: C:\...
+        info = f"{item['name']}{days_text}\n{status_text}"
         
         ctk.CTkLabel(row, text=icon, font=("Arial", 16)).pack(side="left", padx=10)
         ctk.CTkLabel(row, text=info, anchor="w", justify="left", font=self.f_body).pack(side="left", padx=5)

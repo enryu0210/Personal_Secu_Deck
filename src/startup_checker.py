@@ -2,6 +2,8 @@
 import winreg
 import json
 import os
+import psutil
+from datetime import datetime
 
 class StartupMonitor:
     def __init__(self, db_file="startup_snapshot.json"):
@@ -132,3 +134,31 @@ class StartupMonitor:
                     self.save_snapshot(data)
             except:
                 pass
+
+    def get_process_status(self, exe_path):
+        """
+        해당 경로의 프로그램이 실제로 실행 중인지 확인하고,
+        실행 중이라면 메모리 사용량을 반환합니다.
+        """
+        if not exe_path:
+            return "정보 없음"
+            
+        target_name = os.path.basename(exe_path).lower() # 예: kakaotalk.exe
+        
+        # 현재 실행 중인 모든 프로세스 뒤지기
+        for proc in psutil.process_iter(['name', 'memory_info', 'exe']):
+            try:
+                # 1. 이름으로 1차 비교
+                if proc.info['name'] and proc.info['name'].lower() == target_name:
+                    mem_mb = proc.info['memory_info'].rss / (1024 * 1024) # MB 단위 변환
+                    return f"🟢 실행 중 ({mem_mb:.1f} MB)"
+                
+                # 2. (정확도 향상) 전체 경로로 2차 비교
+                if proc.info['exe'] and os.path.normpath(proc.info['exe']).lower() == os.path.normpath(exe_path).lower():
+                    mem_mb = proc.info['memory_info'].rss / (1024 * 1024)
+                    return f"🟢 실행 중 ({mem_mb:.1f} MB)"
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+                
+        return "⚪ 실행 안 됨 (리소스 0)"
