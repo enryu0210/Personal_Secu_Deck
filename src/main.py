@@ -1630,87 +1630,139 @@ class StartupFrame(ctk.CTkFrame):
         super().__init__(master, corner_radius=0, fg_color="transparent")
         
         self.monitor = StartupMonitor()
-        self.f_body = f_body # 폰트 저장해둠
+        self.f_body = f_body
+        self.current_mode = "new"  # 현재 보고 있는 탭 기억 (기본값: new)
         
-        ctk.CTkLabel(self, text="🚀 시작 프로그램 감시", font=f_title).pack(pady=20, padx=20, anchor="w")
+        # 타이틀
+        ctk.CTkLabel(self, text="🚀 시작 프로그램 관리", font=f_title).pack(pady=20, padx=20, anchor="w")
         
-        # 1. 상태 박스
-        self.status_box = ctk.CTkFrame(self, fg_color="gray", corner_radius=10, height=80)
-        self.status_box.pack(fill="x", padx=20, pady=10)
+        # 1. 상단: 상태 요약 박스
+        self.status_box = ctk.CTkFrame(self, fg_color="gray", corner_radius=10, height=60)
+        self.status_box.pack(fill="x", padx=20, pady=(0, 10))
         
-        self.lbl_status = ctk.CTkLabel(self.status_box, text="검사 중...", font=ctk.CTkFont(family="Malgun Gothic", size=18, weight="bold"), text_color="white")
+        self.lbl_status = ctk.CTkLabel(self.status_box, text="상태 확인 중...", font=ctk.CTkFont(family="Malgun Gothic", size=16, weight="bold"), text_color="white")
         self.lbl_status.place(relx=0.5, rely=0.5, anchor="center")
-        
-        # 2. 감지된 항목 리스트 (여기에 버튼이 들어감)
-        self.lbl_warning_detail = ctk.CTkLabel(self, text="[새로 발견된 프로그램 - 승인 필요]", text_color="#E74C3C", font=f_body)
-        # 스크롤 가능한 프레임으로 변경 (버튼을 넣기 위해)
-        self.scroll_list = ctk.CTkScrollableFrame(self, height=200, label_text="감지 목록")
-        
-        # 3. 수동 검사 버튼
-        self.btn_refresh = ctk.CTkButton(self, text="🔄 다시 검사하기", command=self.run_manual_check, font=f_body, fg_color="#555555")
-        self.btn_refresh.pack(side="bottom", pady=20)
 
-    def run_manual_check(self):
-        # 수동 버튼 눌렀을 때 실행
+        # 2. 탭 버튼 (새 항목 보기 / 전체 관리)
+        self.tab_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.tab_frame.pack(fill="x", padx=20, pady=5)
+        
+        self.btn_show_new = ctk.CTkButton(self.tab_frame, text="🔔 감지된 변경사항", width=140, fg_color="#E67E22", command=self.switch_to_new)
+        self.btn_show_new.pack(side="left", padx=(0, 10))
+        
+        self.btn_show_all = ctk.CTkButton(self.tab_frame, text="📋 전체 목록 관리", width=140, fg_color="#2980B9", command=self.switch_to_all)
+        self.btn_show_all.pack(side="left")
+
+        # 3. 리스트 영역 (스크롤)
+        self.list_label = ctk.CTkLabel(self, text="목록", font=f_body, anchor="w")
+        self.list_label.pack(fill="x", padx=25, pady=(10, 0))
+
+        self.scroll_list = ctk.CTkScrollableFrame(self, height=300, label_text="")
+        self.scroll_list.pack(fill="both", expand=True, padx=20, pady=5)
+
+    def run_check(self):
+        """데이터를 다시 읽어오고 UI를 갱신합니다."""
         status, new_items = self.monitor.check_for_changes()
         self.update_ui(status, new_items)
 
     def update_ui(self, status, new_items):
-        # UI 초기화 (기존 목록 지우기)
-        self.lbl_warning_detail.pack_forget()
-        self.scroll_list.pack_forget()
-        for widget in self.scroll_list.winfo_children():
-            widget.destroy()
+        # 1. 상단 상태박스 업데이트
+        self.update_status_box(status, len(new_items))
+        
+        # 2. 현재 보고 있는 탭에 맞춰서 목록 새로고침 (이게 핵심!)
+        if self.current_mode == "new":
+            if new_items:
+                self.show_new_items_view(new_items)
+            else:
+                # 감지된 게 다 처리돼서 없으면 -> 자동으로 '전체 목록'으로 전환
+                self.switch_to_all()
+        else:
+            # 전체 목록 보고 있었으면 -> 전체 목록 새로고침
+            self.show_all_items_view()
 
+    def update_status_box(self, status, count):
         if status == "SAFE":
-            self.status_box.configure(fg_color="#1E8449") # 초록
-            self.lbl_status.configure(text="✅ 현재 시스템은 안전합니다.")
-            
-        elif status == "FIRST_RUN":
-            self.status_box.configure(fg_color="#2980B9") # 파랑
-            self.lbl_status.configure(text="ℹ️ 기준 스냅샷을 생성했습니다.")
-            
+            self.status_box.configure(fg_color="#1E8449")
+            self.lbl_status.configure(text="✅ 시스템이 안전합니다.")
         elif status == "WARNING":
-            self.status_box.configure(fg_color="#C0392B") # 빨강
-            self.lbl_status.configure(text=f"🚨 {len(new_items)}개의 새로운 시작프로그램 감지!")
-            
-            # 리스트 보여주기
-            self.lbl_warning_detail.pack(pady=(10, 5))
-            self.scroll_list.pack(fill="x", padx=20)
-            
-            # [핵심] 각 아이템마다 '승인' 버튼 생성
-            for item in new_items:
-                self.create_item_row(item)
+            self.status_box.configure(fg_color="#C0392B")
+            self.lbl_status.configure(text=f"🚨 {count}개의 새로운 시작프로그램이 감지되었습니다!")
+        else:
+            self.status_box.configure(fg_color="#2980B9")
+            self.lbl_status.configure(text="ℹ️ 기준 스냅샷을 생성했습니다.")
 
-    def create_item_row(self, item):
+    # --- 탭 전환 함수 ---
+    def switch_to_new(self):
+        self.current_mode = "new"
+        self.run_check() # 데이터 다시 읽어서 뷰 갱신
+
+    def switch_to_all(self):
+        self.current_mode = "all"
+        self.run_check() # 데이터 다시 읽어서 뷰 갱신
+
+    # --- 뷰 그리기 함수 ---
+    def show_new_items_view(self, items):
+        self.list_label.configure(text="🔔 새로 추가된 프로그램 (승인이 필요합니다)")
+        self._clear_list()
+        
+        if not items:
+            ctk.CTkLabel(self.scroll_list, text="새로 감지된 항목이 없습니다.").pack(pady=20)
+            return
+
+        for item in items:
+            self._create_row(item, is_new=True)
+
+    def show_all_items_view(self):
+        self.list_label.configure(text="📋 현재 등록된 모든 시작 프로그램")
+        self._clear_list()
+        
+        programs = self.monitor.get_current_startup_programs() or {}
+        if not programs:
+            ctk.CTkLabel(self.scroll_list, text="등록된 시작 프로그램이 없습니다.").pack(pady=20)
+            return
+
+        for name, path in programs.items():
+            self._create_row({"name": name, "path": path}, is_new=False)
+
+    def _clear_list(self):
+        for w in self.scroll_list.winfo_children():
+            w.destroy()
+
+    def _create_row(self, item, is_new):
         row = ctk.CTkFrame(self.scroll_list)
         row.pack(fill="x", pady=5)
         
-        # 프로그램 정보 (이름, 경로)
-        info_text = f"{item['name']}\n({item['path']})"
-        ctk.CTkLabel(row, text=info_text, anchor="w", font=self.f_body).pack(side="left", padx=10, pady=5)
+        icon = "🆕" if is_new else "🔹"
+        info = f"{item['name']}\n{item['path']}"
         
-        # 승인 버튼
-        btn_approve = ctk.CTkButton(
-            row, 
-            text="승인 (안전함)", 
-            width=100, 
-            fg_color="#27AE60", 
-            hover_color="#2ECC71",
-            command=lambda: self.approve_item(item)
-        )
-        btn_approve.pack(side="right", padx=10)
+        ctk.CTkLabel(row, text=icon, font=("Arial", 16)).pack(side="left", padx=10)
+        ctk.CTkLabel(row, text=info, anchor="w", justify="left", font=self.f_body).pack(side="left", padx=5)
 
+        btn_frame = ctk.CTkFrame(row, fg_color="transparent")
+        btn_frame.pack(side="right", padx=10)
+
+        if is_new:
+            ctk.CTkButton(btn_frame, text="승인", width=60, fg_color="#27AE60", 
+                          command=lambda: self.approve_item(item)).pack(side="left", padx=2)
+
+        ctk.CTkButton(btn_frame, text="삭제", width=60, fg_color="#C0392B", 
+                      command=lambda: self.delete_item(item)).pack(side="left", padx=2)
+
+    # --- 동작 함수 (핵심: 작업 후 run_check 호출) ---
     def approve_item(self, item):
-        # 1. 로직에게 "이거 저장해!"라고 명령
-        success = self.monitor.approve_new_program(item['name'], item['path'])
-        
+        self.monitor.approve_new_program(item['name'], item['path'])
+        self.run_check() # [중요] 즉시 새로고침
+
+    def delete_item(self, item):
+        if not messagebox.askyesno("삭제 확인", f"정말 '{item['name']}'을(를) 시작 프로그램에서 제거하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다."):
+            return
+
+        success, msg = self.monitor.delete_program(item['name'])
         if success:
-            # 2. 성공했으면 화면 갱신 (다시 검사하면 이제 SAFE로 뜰 것임)
-            print(f"승인 완료: {item['name']}")
-            self.run_manual_check() # UI 업데이트
+            messagebox.showinfo("삭제 완료", f"{item['name']}이(가) 제거되었습니다.")
+            self.run_check() # [중요] 즉시 새로고침
         else:
-            print("승인 실패")
+            messagebox.showerror("삭제 실패", msg)
 
 class AIFrame(ctk.CTkFrame):
     def __init__(self, master, f_title, f_body):

@@ -95,10 +95,40 @@ class StartupMonitor:
             print(f"승인 오류: {e}")
             return False
 
-# 테스트용 코드 (이 파일을 직접 실행했을 때만 동작)
-if __name__ == "__main__":
-    monitor = StartupMonitor()
-    status, new_items = monitor.check_for_changes()
-    print(f"상태: {status}")
-    if new_items:
-        print("새로 발견된 항목:", new_items)
+    # [✅ 추가된 기능] 시작 프로그램에서 제거하는 함수
+    def delete_program(self, program_name):
+        """
+        레지스트리에서 해당 프로그램을 제거합니다.
+        성공 시 True, 실패 시 False 반환
+        """
+        try:
+            # 레지스트리 키 열기 (쓰기 권한 KEY_WRITE 필요)
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.registry_path, 0, winreg.KEY_WRITE)
+            
+            # 값 삭제
+            winreg.DeleteValue(key, program_name)
+            winreg.CloseKey(key)
+            
+            # 스냅샷(DB)에서도 제거하여 동기화
+            self._remove_from_snapshot(program_name)
+            
+            return True, "삭제 성공"
+        except FileNotFoundError:
+            return False, "이미 삭제되었거나 존재하지 않는 프로그램입니다."
+        except PermissionError:
+            return False, "권한이 부족합니다. 관리자 권한으로 실행해주세요."
+        except Exception as e:
+            return False, f"삭제 오류: {str(e)}"
+
+    def _remove_from_snapshot(self, name):
+        """내부 DB(json)에서도 삭제"""
+        if os.path.exists(self.db_file):
+            try:
+                with open(self.db_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                if name in data:
+                    del data[name]
+                    self.save_snapshot(data)
+            except:
+                pass
