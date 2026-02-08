@@ -2,6 +2,8 @@
 import winreg
 import json
 import os
+import psutil
+from datetime import datetime
 
 class StartupMonitor:
     def __init__(self, db_file="startup_snapshot.json"):
@@ -95,10 +97,68 @@ class StartupMonitor:
             print(f"승인 오류: {e}")
             return False
 
-# 테스트용 코드 (이 파일을 직접 실행했을 때만 동작)
-if __name__ == "__main__":
-    monitor = StartupMonitor()
-    status, new_items = monitor.check_for_changes()
-    print(f"상태: {status}")
-    if new_items:
-        print("새로 발견된 항목:", new_items)
+    # [✅ 추가된 기능] 시작 프로그램에서 제거하는 함수
+    def delete_program(self, program_name):
+        """
+        레지스트리에서 해당 프로그램을 제거합니다.
+        성공 시 True, 실패 시 False 반환
+        """
+        try:
+            # 레지스트리 키 열기 (쓰기 권한 KEY_WRITE 필요)
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.registry_path, 0, winreg.KEY_WRITE)
+            
+            # 값 삭제
+            winreg.DeleteValue(key, program_name)
+            winreg.CloseKey(key)
+            
+            # 스냅샷(DB)에서도 제거하여 동기화
+            self._remove_from_snapshot(program_name)
+            
+            return True, "삭제 성공"
+        except FileNotFoundError:
+            return False, "이미 삭제되었거나 존재하지 않는 프로그램입니다."
+        except PermissionError:
+            return False, "권한이 부족합니다. 관리자 권한으로 실행해주세요."
+        except Exception as e:
+            return False, f"삭제 오류: {str(e)}"
+
+    def _remove_from_snapshot(self, name):
+        """내부 DB(json)에서도 삭제"""
+        if os.path.exists(self.db_file):
+            try:
+                with open(self.db_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                if name in data:
+                    del data[name]
+                    self.save_snapshot(data)
+            except:
+                pass
+
+    def get_process_status(self, exe_path):
+        """
+        해당 경로의 프로그램이 실제로 실행 중인지 확인하고,
+        실행 중이라면 메모리 사용량을 반환합니다.
+        """
+        if not exe_path:
+            return "정보 없음"
+            
+        target_name = os.path.basename(exe_path).lower() # 예: kakaotalk.exe
+        
+        # 현재 실행 중인 모든 프로세스 뒤지기
+        for proc in psutil.process_iter(['name', 'memory_info', 'exe']):
+            try:
+                # 1. 이름으로 1차 비교
+                if proc.info['name'] and proc.info['name'].lower() == target_name:
+                    mem_mb = proc.info['memory_info'].rss / (1024 * 1024) # MB 단위 변환
+                    return f"🟢 실행 중 ({mem_mb:.1f} MB)"
+                
+                # 2. (정확도 향상) 전체 경로로 2차 비교
+                if proc.info['exe'] and os.path.normpath(proc.info['exe']).lower() == os.path.normpath(exe_path).lower():
+                    mem_mb = proc.info['memory_info'].rss / (1024 * 1024)
+                    return f"🟢 실행 중 ({mem_mb:.1f} MB)"
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+                
+        return "⚪ 실행 안 됨 (리소스 0)"
